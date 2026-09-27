@@ -46,8 +46,14 @@ Reference: [OWASP API Security Top 10 2023](https://owasp.org/API-Security/editi
 | Covering tracks | Append-only audit log; SQLite triggers abort any update or delete |
 | Spreadsheet injection | CSV cells that start with `=`, `+`, `-`, `@`, tab or carriage return are prefixed with `'` |
 
-There is no sign-up: administrators are created and reset only from the shell (`asystant_api admin
-create|reset <username>`). Authenticator secrets are sealed with `ASYSTANT_MANAGED_ENCRYPTION_KEY`.
+There is no open sign-up. An administrator is set up through a one-time link (256-bit token,
+stored as SHA-256, valid 24 hours, consumed in the same transaction that creates the account): the
+first one is written to the logs while no administrator exists, the others come from the shell
+(`asystant_api admin create|reset <username>`). The link page shows the authenticator QR code and
+requires a valid code before anything is saved. `admin reset` disables the account and ends its
+sessions at once. Recovery needs shell access to the server, the same trust as enrollment (ASVS
+6.4.4); there is deliberately no email recovery. The first-run link is the one secret written to
+the logs: it works once, expires, and a used or replaced link is refused. Authenticator secrets are sealed with `ASYSTANT_MANAGED_ENCRYPTION_KEY`.
 An access gate at the edge in front of `/admin` (for example Cloudflare Access or an allowlist) is
 recommended as a factor that lives outside this service.
 

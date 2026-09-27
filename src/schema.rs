@@ -49,6 +49,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    admin_setup_tokens (token_hash) {
+        token_hash -> Text,
+        username -> Nullable<Text>,
+        totp_sealed -> Binary,
+        created_at -> TimestamptzSqlite,
+        expires_at -> TimestamptzSqlite,
+        used_at -> Nullable<TimestamptzSqlite>,
+    }
+}
+
+diesel::table! {
     admin_sessions (id) {
         id -> Text,
         token_hash -> Text,

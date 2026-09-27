@@ -19,18 +19,33 @@ The console starts when these are set (see [.env.example](../.env.example)):
 
 ## First administrator
 
-There is no sign-up page. Create the account from the container shell:
+There is no open sign-up. While the database has no administrator, every start
+of the service writes a one-time link to the logs:
 
-```sh
-docker exec -it CONTAINER asystant_api admin create jhonacode
+```text
+No administrator yet. Open this link once, before 2026-09-28 10:00 UTC, to set up the /admin console: https://ai.jhonacode.com/admin/setup?token=…
 ```
 
-It prints a random password, the authenticator secret and an `otpauth://`
-link. Add the secret to an authenticator app, sign in, and change the password
-under **Security**. The same command with `reset` issues a new password and
-authenticator and signs out every session of that administrator: it is the
-recovery path when the authenticator is lost or the account is locked.
-Usernames are 3–64 lowercase letters, digits, dots, hyphens or underscores.
+The link opens a page where you choose the username and password, scan the QR
+code with an authenticator app (or type the key it shows) and confirm with the
+code the app displays. You are signed in right away. The link works once and
+for 24 hours; a newer start replaces it, and once an administrator exists no
+first-run link is issued again.
+
+From the container shell:
+
+```sh
+docker exec -it CONTAINER asystant_api admin create maria   # a link for another administrator
+docker exec -it CONTAINER asystant_api admin reset jhonacode # recovery
+```
+
+`admin reset` is the recovery path when the authenticator or the password is
+lost, or the account is locked or stolen: it disables the account and signs it
+out everywhere at once, and prints a link that sets a new password and
+authenticator. It needs shell access to the server, the same level of trust as
+creating the first administrator. There is no email recovery on purpose: it
+would let whoever controls the mailbox take over the console. Usernames are
+3–64 lowercase letters, digits, dots, hyphens or underscores.
 
 ## What it does
 

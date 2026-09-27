@@ -70,17 +70,17 @@ Cloudflare Access) is recommended.
 
 ## First administrator
 
-After the first deployment, open a shell in the container and create the
-administrator:
+After the first deployment, look for this line in the application logs:
 
-```sh
-docker exec -it CONTAINER asystant_api admin create jhonacode
+```text
+No administrator yet. Open this link once, before … UTC, to set up the /admin console: https://ai.jhonacode.com/admin/setup?token=…
 ```
 
-The command prints a random password and the authenticator secret once. Add the
-secret to an authenticator app, sign in at `https://ai.jhonacode.com/admin` and
-change the password under **Security**. `admin reset <username>` issues new
-credentials and signs out every session of that administrator. See
+Open the link, choose the username and password, scan the QR code with your
+authenticator app and confirm with its code. The link works once and for 24
+hours; every restart prints a new one until an administrator exists. If the
+account is lost later, `docker exec -it CONTAINER asystant_api admin reset
+<username>` locks it, signs it out everywhere and prints a new link. See
 [operator console](operator-console.md).
 
 Each company stores this HTTPS origin and the API key created for it in the

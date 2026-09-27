@@ -1,10 +1,13 @@
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use diesel::{
     BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl,
-    SelectableHelper,
+    SelectableHelper, SqliteConnection,
 };
 
-use crate::admin::model::{AdminSession, AdminUser, AuditEntry, NewAuditEntry, SignInAttempt};
+use crate::admin::model::{
+    AdminSession, AdminSetupToken, AdminUser, AuditEntry, NewAuditEntry, SetupCompletion,
+    SignInAttempt,
+};
 use crate::error::AppError;
 use crate::managed::client_model::{ManagedClientKey, ManagedClientWorkspace};
 use crate::managed::ledger_model::{ManagedBudgetAccount, ManagedKeyLease, OWNER_TENANT};
@@ -12,6 +15,7 @@ use crate::managed::policy_model::ManagedPolicy;
 use crate::repository::PoolConfig;
 use crate::schema::admin_audit_log::dsl as audit;
 use crate::schema::admin_sessions::dsl as sessions;
+use crate::schema::admin_setup_tokens::dsl as setups;
 use crate::schema::admin_sign_in_attempts::dsl as attempts;
 use crate::schema::admin_users::dsl as admins;
 use crate::schema::managed_budget_accounts::dsl as budgets;
@@ -22,15 +26,22 @@ use crate::schema::managed_policies::dsl as policies;
 
 /// Operators, their sessions, sign-in attempts and the audit trail.
 pub trait AdminRepository: Send + Sync {
-    fn insert_admin(&self, admin: &AdminUser) -> Result<(), AppError>;
     fn admin_by_username(&self, username: &str) -> Result<Option<AdminUser>, AppError>;
-    fn reset_admin(
+    /// Stores a link for a new account; the previous unused one for the same
+    /// account stops working. False when the account it would create exists.
+    fn issue_setup_token(&self, token: &AdminSetupToken) -> Result<bool, AppError>;
+    /// Locks the account and ends its sessions at once, and stores the link
+    /// that sets it up again. False when there is no such account.
+    fn start_reset(&self, token: &AdminSetupToken, now: DateTime<Utc>) -> Result<bool, AppError>;
+    /// An unused, unexpired link and whether its account already exists.
+    fn setup_token(
         &self,
-        username: &str,
-        password_hash: &str,
-        totp_sealed: &[u8],
+        token_hash: &str,
         now: DateTime<Utc>,
-    ) -> Result<bool, AppError>;
+    ) -> Result<Option<(AdminSetupToken, bool)>, AppError>;
+    /// Consumes the link and leaves the new credentials on the account, in one
+    /// transaction.
+    fn complete_setup(&self, completion: &SetupCompletion) -> Result<AdminUser, AppError>;
     fn advance_totp_step(&self, admin_id: &str, step: i64) -> Result<bool, AppError>;
     fn record_sign_in(
         &self,
@@ -88,13 +99,6 @@ pub trait AdminRepository: Send + Sync {
 }
 
 impl AdminRepository for PoolConfig {
-    fn insert_admin(&self, admin: &AdminUser) -> Result<(), AppError> {
-        diesel::insert_into(admins::admin_users)
-            .values(admin)
-            .execute(&mut self.conn()?)?;
-        Ok(())
-    }
-
     fn admin_by_username(&self, username: &str) -> Result<Option<AdminUser>, AppError> {
         Ok(admins::admin_users
             .filter(admins::username.eq(username))
@@ -104,33 +108,52 @@ impl AdminRepository for PoolConfig {
             .optional()?)
     }
 
-    fn reset_admin(
-        &self,
-        username: &str,
-        password_hash: &str,
-        totp_sealed: &[u8],
-        now: DateTime<Utc>,
-    ) -> Result<bool, AppError> {
+    fn issue_setup_token(&self, token: &AdminSetupToken) -> Result<bool, AppError> {
         self.conn()?.immediate_transaction(|conn| {
-            let Some(id) = admins::admin_users
-                .filter(admins::username.eq(username))
-                .select(admins::id)
-                .first::<String>(conn)
-                .optional()?
-            else {
+            match &token.username {
+                // The first administrator: only while there is none.
+                None => {
+                    let admins = admins::admin_users.count().get_result::<i64>(conn)?;
+                    if admins > 0 {
+                        return Ok(false);
+                    }
+                    diesel::delete(
+                        setups::admin_setup_tokens
+                            .filter(setups::username.is_null())
+                            .filter(setups::used_at.is_null()),
+                    )
+                    .execute(conn)?;
+                }
+                Some(username) => {
+                    if Self::admin_id(conn, username)?.is_some() {
+                        return Ok(false);
+                    }
+                    Self::discard_setup_tokens(conn, username)?;
+                }
+            }
+            diesel::insert_into(setups::admin_setup_tokens)
+                .values(token)
+                .execute(conn)?;
+            Ok(true)
+        })
+    }
+
+    fn start_reset(&self, token: &AdminSetupToken, now: DateTime<Utc>) -> Result<bool, AppError> {
+        let Some(username) = token.username.as_deref() else {
+            return Err(AppError::Invalid);
+        };
+        self.conn()?.immediate_transaction(|conn| {
+            let Some(id) = Self::admin_id(conn, username)? else {
                 return Ok(false);
             };
+            // The old password and authenticator stop working now, not when
+            // the link is used: a reset is also the answer to a stolen account.
             diesel::update(admins::admin_users.filter(admins::id.eq(&id)))
                 .set((
-                    admins::password_hash.eq(password_hash),
-                    admins::totp_sealed.eq(totp_sealed),
-                    admins::totp_last_step.eq(0_i64),
+                    admins::disabled_at.eq(Some(now)),
                     admins::pending_totp_sealed.eq(None::<Vec<u8>>),
-                    admins::password_changed_at.eq(now),
-                    admins::disabled_at.eq(None::<DateTime<Utc>>),
                 ))
                 .execute(conn)?;
-            // A reset ends every session that the old credentials opened.
             diesel::update(
                 sessions::admin_sessions
                     .filter(sessions::admin_id.eq(&id))
@@ -138,7 +161,87 @@ impl AdminRepository for PoolConfig {
             )
             .set(sessions::revoked_at.eq(Some(now)))
             .execute(conn)?;
+            Self::discard_setup_tokens(conn, username)?;
+            diesel::insert_into(setups::admin_setup_tokens)
+                .values(token)
+                .execute(conn)?;
             Ok(true)
+        })
+    }
+
+    fn setup_token(
+        &self,
+        token_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(AdminSetupToken, bool)>, AppError> {
+        let mut conn = self.conn()?;
+        let Some(token) = Self::open_setup_token(&mut conn, token_hash, now)? else {
+            return Ok(None);
+        };
+        let exists = match token.username.as_deref() {
+            Some(username) => Self::admin_id(&mut conn, username)?.is_some(),
+            None => false,
+        };
+        Ok(Some((token, exists)))
+    }
+
+    fn complete_setup(&self, completion: &SetupCompletion) -> Result<AdminUser, AppError> {
+        let now = completion.now;
+        self.conn()?.immediate_transaction(|conn| {
+            let token = Self::open_setup_token(conn, &completion.token_hash, now)?
+                .ok_or(AppError::Conflict)?;
+            match token.username.as_deref() {
+                // A first-run link printed before an administrator existed
+                // cannot create a second one.
+                None if admins::admin_users.count().get_result::<i64>(conn)? > 0 => {
+                    return Err(AppError::Conflict);
+                }
+                Some(username) if username != completion.username => {
+                    return Err(AppError::Conflict);
+                }
+                _ => {}
+            }
+            match Self::admin_id(conn, &completion.username)? {
+                Some(id) => {
+                    diesel::update(admins::admin_users.filter(admins::id.eq(&id)))
+                        .set((
+                            admins::password_hash.eq(&completion.password_hash),
+                            admins::totp_sealed.eq(&token.totp_sealed),
+                            admins::totp_last_step.eq(completion.totp_step),
+                            admins::pending_totp_sealed.eq(None::<Vec<u8>>),
+                            admins::password_changed_at.eq(now),
+                            admins::disabled_at.eq(None::<DateTime<Utc>>),
+                        ))
+                        .execute(conn)?;
+                }
+                None => {
+                    let admin = AdminUser {
+                        id: completion.admin_id.clone(),
+                        username: completion.username.clone(),
+                        password_hash: completion.password_hash.clone(),
+                        totp_sealed: token.totp_sealed.clone(),
+                        totp_last_step: completion.totp_step,
+                        pending_totp_sealed: None,
+                        created_at: now,
+                        password_changed_at: now,
+                        last_sign_in_at: None,
+                        last_sign_in_source: None,
+                        disabled_at: None,
+                    };
+                    diesel::insert_into(admins::admin_users)
+                        .values(&admin)
+                        .execute(conn)?;
+                }
+            }
+            diesel::update(
+                setups::admin_setup_tokens.filter(setups::token_hash.eq(&token.token_hash)),
+            )
+            .set(setups::used_at.eq(Some(now)))
+            .execute(conn)?;
+            Ok(admins::admin_users
+                .filter(admins::username.eq(&completion.username))
+                .select(AdminUser::as_select())
+                .first::<AdminUser>(conn)?)
         })
     }
 
@@ -346,6 +449,41 @@ impl AdminRepository for PoolConfig {
             query = query.filter(audit::company_id.eq(company));
         }
         Ok(query.load(&mut self.conn()?)?)
+    }
+}
+
+impl PoolConfig {
+    fn admin_id(conn: &mut SqliteConnection, username: &str) -> Result<Option<String>, AppError> {
+        Ok(admins::admin_users
+            .filter(admins::username.eq(username))
+            .select(admins::id)
+            .first::<String>(conn)
+            .optional()?)
+    }
+
+    /// Only the newest link of an account works.
+    fn discard_setup_tokens(conn: &mut SqliteConnection, username: &str) -> Result<(), AppError> {
+        diesel::delete(
+            setups::admin_setup_tokens
+                .filter(setups::username.eq(username))
+                .filter(setups::used_at.is_null()),
+        )
+        .execute(conn)?;
+        Ok(())
+    }
+
+    fn open_setup_token(
+        conn: &mut SqliteConnection,
+        token_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<AdminSetupToken>, AppError> {
+        Ok(setups::admin_setup_tokens
+            .filter(setups::token_hash.eq(token_hash))
+            .filter(setups::used_at.is_null())
+            .filter(setups::expires_at.gt(now))
+            .select(AdminSetupToken::as_select())
+            .first::<AdminSetupToken>(conn)
+            .optional()?)
     }
 }
 

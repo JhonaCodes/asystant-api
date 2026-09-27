@@ -1,6 +1,6 @@
 [package]
 name = "asystant_api"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/JhonaCodes/asystant-api"
@@ -32,6 +32,7 @@ subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+qrcode = { version = "0.14.1", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

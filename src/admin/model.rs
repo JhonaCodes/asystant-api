@@ -12,7 +12,9 @@ use crate::managed::client_model::{
 };
 use crate::managed::model::ManagedSecret;
 use crate::managed::policy_model::ManagedRecoveryRequest;
-use crate::schema::{admin_audit_log, admin_sessions, admin_sign_in_attempts, admin_users};
+use crate::schema::{
+    admin_audit_log, admin_sessions, admin_setup_tokens, admin_sign_in_attempts, admin_users,
+};
 
 /// An operator of the console. The TOTP secret is sealed; the password is an
 /// argon2id hash.
@@ -175,20 +177,112 @@ pub struct RequestOrigin {
     pub user_agent: String,
 }
 
-/// Shown once by the command line when an administrator is created or reset.
-#[derive(Clone)]
-pub struct AdminCredentials {
-    pub username: String,
-    pub password: ManagedSecret,
-    pub totp_secret: String,
-    pub totp_uri: String,
+/// A one-time link that sets up an administrator in the browser. Without a
+/// username it is the first administrator's, who chooses one on the page.
+#[derive(Clone, Serialize, Deserialize, Queryable, Selectable, Insertable)]
+#[diesel(table_name = admin_setup_tokens)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+pub struct AdminSetupToken {
+    #[serde(skip)]
+    pub token_hash: String,
+    pub username: Option<String>,
+    #[serde(skip)]
+    pub totp_sealed: Vec<u8>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub used_at: Option<DateTime<Utc>>,
 }
 
-impl Debug for AdminCredentials {
+impl Debug for AdminSetupToken {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("AdminCredentials")
+            .debug_struct("AdminSetupToken")
             .field("username", &self.username)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a setup link does once it is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupKind {
+    /// No administrator exists yet.
+    First,
+    /// A new administrator with a fixed username.
+    Invitation,
+    /// New password and authenticator for an existing administrator.
+    Reset,
+}
+
+/// The link printed once by the command line or at the first start.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SetupInvitation {
+    pub token: ManagedSecret,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl SetupInvitation {
+    pub fn url(&self, public_origin: &str) -> String {
+        format!(
+            "{}/admin/setup?token={}",
+            public_origin.trim_end_matches('/'),
+            self.token.expose()
+        )
+    }
+}
+
+impl Debug for SetupInvitation {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SetupInvitation")
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A setup link being used: the credentials it leaves on the account.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SetupCompletion {
+    #[serde(skip)]
+    pub token_hash: String,
+    pub username: String,
+    /// Used only when the link creates the account.
+    pub admin_id: String,
+    #[serde(skip)]
+    pub password_hash: String,
+    /// The authenticator step the setup consumed.
+    pub totp_step: i64,
+    pub now: DateTime<Utc>,
+}
+
+impl Debug for SetupCompletion {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SetupCompletion")
+            .field("username", &self.username)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The setup page: who is being set up and the authenticator to scan.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SetupPage {
+    pub username: Option<String>,
+    pub kind: SetupKind,
+    #[serde(skip)]
+    pub secret: String,
+    #[serde(skip)]
+    pub uri: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl Debug for SetupPage {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SetupPage")
+            .field("username", &self.username)
+            .field("kind", &self.kind)
             .finish_non_exhaustive()
     }
 }
@@ -438,6 +532,43 @@ impl Debug for SignInForm {
         formatter
             .debug_struct("SignInForm")
             .field("username", &self.username)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SetupForm {
+    pub csrf: String,
+    pub token: String,
+    /// Only for the first administrator; other links carry the username.
+    #[serde(default)]
+    pub username: String,
+    pub password: String,
+    pub password_confirm: String,
+    pub code: String,
+}
+
+impl Debug for SetupForm {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SetupForm")
+            .field("username", &self.username)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SetupQuery {
+    pub token: String,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl Debug for SetupQuery {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SetupQuery")
+            .field("error", &self.error)
             .finish_non_exhaustive()
     }
 }

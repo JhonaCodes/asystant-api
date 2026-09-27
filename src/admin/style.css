@@ -335,6 +335,15 @@ dl.facts dd { margin: 0; overflow-wrap: anywhere; }
 
 .auth { max-width: 420px; width: 100%; margin: 48px auto; padding-inline: 16px; display: flex; flex-direction: column; gap: 24px; }
 .auth .brand { font-size: 30px; }
+.auth.wide { max-width: 560px; }
+
+.totp-setup { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+.totp-setup > div { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 10px; font-size: 14px; }
+.totp-setup p { margin: 0; }
+svg.qr { width: 184px; height: 184px; flex: none; border-radius: 8px; }
+/* Scanners need dark modules on a light background, in both themes. */
+.qr-light { fill: #ffffff; }
+.qr-dark { fill: #000000; }
 
 .danger-zone { border-color: var(--danger); }
 .danger-zone h2 { color: var(--danger); }

@@ -1,11 +1,14 @@
 //! Server-rendered pages of the operator console. No page contains a script or
 //! an inline style: every dynamic value is escaped here, and the meters and the
 //! chart are SVG attributes, which the content security policy allows.
+use std::iter;
+
 use chrono::{DateTime, Datelike, Duration, Utc, Weekday};
+use qrcode::{Color, EcLevel, QrCode};
 
 use crate::admin::model::{
     AdminContext, AuditPage, CompanyPage, CompanyRow, DayTotal, Money, OverviewPage, SecurityPage,
-    TenantPage, TotpEnrollment, Usage,
+    SetupKind, SetupPage, TenantPage, TotpEnrollment, Usage,
 };
 use crate::admin::service::AdminService;
 use crate::managed::client_model::{ClientKeyState, CreatedKey, ManagedClient, ManagedClientKey};
@@ -87,6 +90,48 @@ fn step_up(id: &str, note: &str) -> String {
     )
 }
 
+/// A QR code drawn with SVG rectangles, one path per dark run. Black on white
+/// in both themes, with the 4-module quiet zone scanners expect.
+fn qr(text: &str) -> String {
+    const QUIET: usize = 4;
+    let Ok(code) = QrCode::with_error_correction_level(text.as_bytes(), EcLevel::M) else {
+        return String::new();
+    };
+    let width = code.width();
+    let size = width + QUIET * 2;
+    let mut path = String::new();
+    for (y, row) in code.to_colors().chunks(width).enumerate() {
+        let mut run = None;
+        for (x, color) in row.iter().chain(iter::once(&Color::Light)).enumerate() {
+            match (color, run) {
+                (Color::Dark, None) => run = Some(x),
+                (Color::Light, Some(start)) => {
+                    let length = x - start;
+                    path.push_str(&format!(
+                        "M{} {}h{length}v1h-{length}z",
+                        start + QUIET,
+                        y + QUIET
+                    ));
+                    run = None;
+                }
+                _ => {}
+            }
+        }
+    }
+    format!(
+        "<svg class=\"qr\" viewBox=\"0 0 {size} {size}\" role=\"img\" aria-label=\"QR code for your authenticator app\" shape-rendering=\"crispEdges\"><rect class=\"qr-light\" width=\"{size}\" height=\"{size}\"></rect><path class=\"qr-dark\" d=\"{path}\"></path></svg>"
+    )
+}
+
+/// The QR code and, for apps that cannot scan, the key to type.
+fn authenticator(uri: &str, secret: &str) -> String {
+    format!(
+        "<div class=\"totp-setup\">{}<div><p>Scan the QR code with Google Authenticator, Microsoft Authenticator, 1Password or a similar app. If you cannot scan it, type this key:</p><div class=\"secret\">{}</div></div></div>",
+        qr(uri),
+        escape(secret)
+    )
+}
+
 fn meter(usage: &Usage, label: &str) -> String {
     let spent = Usage::share(usage.spent, usage.limit);
     let held = Usage::share(usage.held, usage.limit).min(100.0 - spent);
@@ -140,6 +185,7 @@ pub fn notice(notice: Option<&str>, error: Option<&str>) -> Option<Notice> {
     from_error.or_else(|| {
         notice.and_then(|code| {
             let text = match code {
+                "welcome" => "Your access is ready. Keep the authenticator app: it is needed for every sign-in and every change.",
                 "company_created" => "Company created. Create its first API key.",
                 "company_updated" => "Company settings saved.",
                 "workspace_added" => "Workspace assigned.",
@@ -239,6 +285,58 @@ pub fn login(csrf: &str, error: Option<&str>) -> String {
         &format!(
             "<main class=\"auth\"><div class=\"stack\"><span class=\"brand\">asystant<span class=\"dot\">·</span>ai</span><h1>Sign in to the operator console</h1><p class=\"muted\">Companies, API keys and OpenRouter spend for {PUBLIC_HOST}.</p></div>{error}<form class=\"panel stack\" method=\"post\" action=\"/admin/login\">{}<label for=\"login-user\">Username<input type=\"text\" id=\"login-user\" name=\"username\" autocomplete=\"username\" required maxlength=\"64\" autocapitalize=\"none\" spellcheck=\"false\"></label><label for=\"login-password\">Password<input type=\"password\" id=\"login-password\" name=\"password\" autocomplete=\"current-password\" required maxlength=\"256\"></label><label for=\"login-code\">Authenticator code<input class=\"code-input\" type=\"text\" id=\"login-code\" name=\"code\" inputmode=\"numeric\" pattern=\"[0-9 ]{{6,7}}\" autocomplete=\"one-time-code\" required><span class=\"hint\">The 6-digit code from your authenticator app.</span></label><button>Sign in</button></form><p class=\"muted\"><small>Five failed attempts lock sign-in for 15 minutes. Sessions end after 30 minutes idle or 8 hours in total. Every attempt is recorded in the audit log.</small></p></main>",
             hidden("csrf", csrf)
+        ),
+    )
+}
+
+pub fn setup(csrf: &str, token: &str, page: &SetupPage, error: Option<&str>) -> String {
+    let error = match error {
+        Some("invalid") => {
+            "<div class=\"notice danger\" role=\"alert\">Check the username (3 to 64 lowercase letters, digits, dots, hyphens or underscores) and that both passwords match and have at least 12 characters.</div>"
+        }
+        Some("code") => {
+            "<div class=\"notice danger\" role=\"alert\">The authenticator code is wrong. Wait for the next code and try again.</div>"
+        }
+        Some("locked") => {
+            "<div class=\"notice danger\" role=\"alert\">Setup is locked for 15 minutes after 5 failed attempts.</div>"
+        }
+        Some("expired") => {
+            "<div class=\"notice danger\" role=\"alert\">The form expired. Fill it in again.</div>"
+        }
+        Some(_) => {
+            "<div class=\"notice danger\" role=\"alert\">The access could not be saved. Try again in a moment.</div>"
+        }
+        None => "",
+    };
+    let (title, button) = match page.kind {
+        SetupKind::First => ("Set up the operator console", "Create access"),
+        SetupKind::Invitation => ("Set up your access", "Create access"),
+        SetupKind::Reset => ("Set new credentials", "Save and sign in"),
+    };
+    let username = match &page.username {
+        Some(username) => format!(
+            "<dl class=\"facts\"><dt>Username</dt><dd><strong>{}</strong></dd></dl>",
+            escape(username)
+        ),
+        None => "<label for=\"setup-user\">Username<input type=\"text\" id=\"setup-user\" name=\"username\" autocomplete=\"username\" required minlength=\"3\" maxlength=\"64\" autocapitalize=\"none\" spellcheck=\"false\"><span class=\"hint\">Lowercase letters, digits, dots, hyphens or underscores.</span></label>".to_string(),
+    };
+    document(
+        title,
+        &format!(
+            "<main class=\"auth wide\"><div class=\"stack\"><span class=\"brand\">asystant<span class=\"dot\">·</span>ai</span><h1>{title}</h1><p class=\"muted\">This link works once, until {} UTC. Choose a password and add the authenticator: you need both to sign in.</p></div>{error}<form class=\"panel stack\" method=\"post\" action=\"/admin/setup\" autocomplete=\"off\">{}{}{username}<label for=\"setup-password\">Password<input type=\"password\" id=\"setup-password\" name=\"password\" autocomplete=\"new-password\" required minlength=\"12\" maxlength=\"256\"><span class=\"hint\">At least 12 characters. A long phrase is best.</span></label><label for=\"setup-password-confirm\">Repeat the password<input type=\"password\" id=\"setup-password-confirm\" name=\"password_confirm\" autocomplete=\"new-password\" required minlength=\"12\" maxlength=\"256\"></label><h2>Authenticator</h2>{}<label for=\"setup-code\">Code shown by the app<input class=\"code-input\" type=\"text\" id=\"setup-code\" name=\"code\" inputmode=\"numeric\" pattern=\"[0-9 ]{{6,7}}\" autocomplete=\"one-time-code\" required></label><button>{button}</button></form><p class=\"muted\"><small>The key is shown only on this page. If you lose the authenticator later, run <code>asystant_api admin reset &lt;username&gt;</code> on the server for a new link.</small></p></main>",
+            page.expires_at.format("%b %-d %H:%M"),
+            hidden("csrf", csrf),
+            hidden("token", token),
+            authenticator(&page.uri, &page.secret),
+        ),
+    )
+}
+
+pub fn setup_invalid() -> String {
+    document(
+        "Link not valid",
+        &format!(
+            "<main class=\"auth\"><div class=\"stack\"><span class=\"brand\">asystant<span class=\"dot\">·</span>ai</span><h1>This link is not valid</h1><p class=\"muted\">It was already used, it expired, or a newer link replaced it. Get a new one on the server with <code>asystant_api admin reset &lt;username&gt;</code>; while no administrator exists, every start of the service prints one to the logs.</p></div><a class=\"button secondary\" href=\"/admin/login\">Go to sign in</a><p class=\"muted\"><small>{PUBLIC_HOST}</small></p></main>"
         ),
     )
 }
@@ -934,9 +1032,8 @@ pub fn security(ctx: &AdminContext, page: &SecurityPage, notice: Option<Notice>)
 
 pub fn totp_enrollment(ctx: &AdminContext, enrollment: &TotpEnrollment) -> String {
     let html = format!(
-        "<div class=\"page-head\"><div class=\"title\"><nav class=\"crumbs\" aria-label=\"Breadcrumb\"><a href=\"/admin/security\">Security</a><span>/</span><span>New authenticator</span></nav><h1>Add the new authenticator</h1></div></div><section class=\"panel stack\"><p>Add this secret to your authenticator app, then enter the code it shows. The old authenticator keeps working until then.</p><div class=\"secret\">{}</div><p class=\"muted\"><small>Or paste this link into an app that accepts it:</small></p><pre class=\"code\">{}</pre><form class=\"stack\" method=\"post\" action=\"/admin/security/authenticator/confirm\">{}<label for=\"enroll-code\">Code from the new authenticator<input class=\"code-input\" type=\"text\" id=\"enroll-code\" name=\"code\" inputmode=\"numeric\" pattern=\"[0-9 ]{{6,7}}\" autocomplete=\"one-time-code\" required></label><div class=\"actions\"><button>Replace authenticator</button><a class=\"button secondary\" href=\"/admin/security\">Cancel</a></div></form></section>",
-        escape(&enrollment.secret),
-        escape(&enrollment.uri),
+        "<div class=\"page-head\"><div class=\"title\"><nav class=\"crumbs\" aria-label=\"Breadcrumb\"><a href=\"/admin/security\">Security</a><span>/</span><span>New authenticator</span></nav><h1>Add the new authenticator</h1></div></div><section class=\"panel stack\"><p>Add the new authenticator, then enter the code it shows. The old one keeps working until then.</p>{}<form class=\"stack\" method=\"post\" action=\"/admin/security/authenticator/confirm\">{}<label for=\"enroll-code\">Code from the new authenticator<input class=\"code-input\" type=\"text\" id=\"enroll-code\" name=\"code\" inputmode=\"numeric\" pattern=\"[0-9 ]{{6,7}}\" autocomplete=\"one-time-code\" required></label><div class=\"actions\"><button>Replace authenticator</button><a class=\"button secondary\" href=\"/admin/security\">Cancel</a></div></form></section>",
+        authenticator(&enrollment.uri, &enrollment.secret),
         hidden("csrf", ctx.csrf()),
     );
     layout(ctx, Section::Security, "New authenticator", None, &html)

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1
+
+- Set up administrators in the browser through a one-time link (24 hours):
+  choose the username and password, scan the authenticator QR code (SVG drawn
+  in Rust, no JavaScript) and confirm with a code. While no administrator
+  exists, every start logs the link; `admin create` prints one for another
+  administrator. No password is printed anymore.
+- `admin reset` disables the account and ends its sessions immediately, and
+  prints a link that sets a new password and authenticator.
+- Show the QR code when replacing the authenticator under Security.
+- Migration `0004_admin_setup` adds the setup links table.
+
 ## 0.4.0
 
 - Add the operator console at `/admin` (served on `ai.jhonacode.com`):
@@ -10,8 +22,7 @@
   session cookies (30 minutes idle, 8 hours total), per-session CSRF tokens and
   an `Origin` check, a lockout after five failures in 15 minutes, a fresh code
   for every change, a strict CSP and an append-only audit log enforced by
-  SQLite triggers. Administrators are created only from the shell
-  (`asystant_api admin create|reset <username>`).
+  SQLite triggers.
 - Replace the single key per client with several API keys per company:
   `ask_live_` + 256 random bits + a checksum, with issue/manage permissions, a
   mandatory expiry, optional source addresses, last use, revocation and

@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::admin::credentials::Tokens;
 use crate::admin::model::{
     AdminContext, AuditQuery, CodeForm, CompanyForm, CompanySettingsForm, CsrfForm, ExportQuery,
-    KeyForm, NoticeQuery, PasswordForm, RecoveryForm, RequestOrigin, SignInForm, SuspendForm,
-    TotpStartForm, WorkspaceForm,
+    IssuedSession, KeyForm, NoticeQuery, PasswordForm, RecoveryForm, RequestOrigin, SetupForm,
+    SetupQuery, SignInForm, SuspendForm, TotpStartForm, WorkspaceForm,
 };
 use crate::admin::service::AdminService;
 use crate::admin::view;
@@ -194,26 +194,80 @@ async fn login(
     state: Data<AdminState>,
     form: Form<SignInForm>,
 ) -> HttpResponse {
-    let expected = request.cookie(LOGIN_COOKIE);
-    if !state.same_origin(&request)
-        || !expected.is_some_and(|cookie| Tokens::equal(cookie.value(), &form.csrf))
-    {
+    if !fresh_form(&request, &state, &form.csrf) {
         return redirect("/admin/login?error=1");
     }
     match state.service.sign_in(&form, &state.origin(&request)).await {
-        Ok(issued) => {
-            let response = with_cookie(
-                redirect("/admin"),
-                &cookie(
-                    SESSION_COOKIE,
-                    issued.token.expose().to_string(),
-                    AdminService::SESSION_HOURS * 3600,
-                ),
-            );
-            with_cookie(response, &cookie(LOGIN_COOKIE, String::new(), 0))
-        }
+        Ok(issued) => signed_in_at("/admin", &issued),
         Err(AppError::Limited) => redirect("/admin/login?error=locked"),
         Err(_) => redirect("/admin/login?error=1"),
+    }
+}
+
+/// The session cookie of a new sign-in; the one-time login form token ends.
+fn signed_in_at(location: &str, issued: &IssuedSession) -> HttpResponse {
+    let response = with_cookie(
+        redirect(location),
+        &cookie(
+            SESSION_COOKIE,
+            issued.token.expose().to_string(),
+            AdminService::SESSION_HOURS * 3600,
+        ),
+    );
+    with_cookie(response, &cookie(LOGIN_COOKIE, String::new(), 0))
+}
+
+/// Pre-session forms (sign-in, setup) prove they came from a page this
+/// console served: the same origin and the token of the login cookie.
+fn fresh_form(request: &HttpRequest, state: &AdminState, csrf: &str) -> bool {
+    state.same_origin(request)
+        && request
+            .cookie(LOGIN_COOKIE)
+            .is_some_and(|cookie| Tokens::equal(cookie.value(), csrf))
+}
+
+// ---------------------------------------------------------------- setup
+
+async fn setup_page(state: Data<AdminState>, query: Query<SetupQuery>) -> HttpResponse {
+    let Ok(csrf) = Tokens::random() else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+    match state.service.setup_page(&query.token).await {
+        Ok(data) => {
+            let body = view::setup(&csrf, &query.token, &data, query.error.as_deref());
+            with_cookie(page(body), &cookie(LOGIN_COOKIE, csrf, 1800))
+        }
+        Err(AppError::NotFound) => page_with(StatusCode::NOT_FOUND, view::setup_invalid()),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn setup(
+    request: HttpRequest,
+    state: Data<AdminState>,
+    form: Form<SetupForm>,
+) -> HttpResponse {
+    // Only a well-formed token goes back into a Location header.
+    if form.token.len() != 64 || !form.token.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return page_with(StatusCode::NOT_FOUND, view::setup_invalid());
+    }
+    let back = |error: &str| redirect(&format!("/admin/setup?token={}&error={error}", form.token));
+    if !fresh_form(&request, &state, &form.csrf) {
+        return back("expired");
+    }
+    match state
+        .service
+        .complete_setup(&form, &state.origin(&request))
+        .await
+    {
+        Ok(issued) => signed_in_at("/admin?notice=welcome", &issued),
+        Err(AppError::Invalid) => back("invalid"),
+        Err(AppError::Authentication) => back("code"),
+        Err(AppError::Limited) => back("locked"),
+        Err(AppError::NotFound | AppError::Conflict) => {
+            page_with(StatusCode::NOT_FOUND, view::setup_invalid())
+        }
+        Err(_) => back("unavailable"),
     }
 }
 
@@ -716,6 +770,8 @@ pub fn routes(config: &mut ServiceConfig) {
             .route("/style.css", web::get().to(styles))
             .route("/login", web::get().to(login_page))
             .route("/login", web::post().to(login))
+            .route("/setup", web::get().to(setup_page))
+            .route("/setup", web::post().to(setup))
             .route("/logout", web::post().to(logout))
             .route("/export.csv", web::get().to(export_all))
             .route("/companies", web::get().to(companies))

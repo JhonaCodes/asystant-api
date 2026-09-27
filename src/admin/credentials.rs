@@ -139,11 +139,6 @@ impl Passwords {
         };
         hasher.verify_password(password.as_bytes(), &parsed).is_ok()
     }
-
-    /// A random 24-character password for a new or reset administrator.
-    pub fn generate() -> Result<String, AppError> {
-        Random::base62(24)
-    }
 }
 
 /// Random tokens for sessions and forms.

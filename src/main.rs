@@ -12,6 +12,7 @@ use asystant_api::{
         service::AdminService,
     },
     admission::{self, Admission},
+    error::AppError,
     handler,
     health::HealthService,
     managed::{
@@ -102,10 +103,7 @@ async fn main() -> anyhow::Result<()> {
         }
         None => (None, None, None),
     };
-    let public_origin = env::var(PUBLIC_ORIGIN_ENV)
-        .ok()
-        .map(|origin| origin.trim().trim_end_matches('/').to_string())
-        .filter(|origin| !origin.is_empty());
+    let public_origin = public_origin();
     let console = match (&encryption_key, &public_origin) {
         (Some(key), Some(origin)) => Some(web::Data::new(AdminState {
             service: AdminService::new(pool.clone(), key.expose(), Some(health.clone()))?,
@@ -119,6 +117,15 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => None,
     };
+    if let (Some(state), Some(origin)) = (&console, &public_origin)
+        && let Some(invitation) = state.service.first_run_invitation().await?
+    {
+        warn!(
+            "No administrator yet. Open this link once, before {} UTC, to set up the /admin console: {}",
+            invitation.expires_at.format("%Y-%m-%d %H:%M"),
+            invitation.url(origin)
+        );
+    }
     let https = public_origin
         .as_deref()
         .is_some_and(|origin| origin.starts_with("https://"));
@@ -167,8 +174,8 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `admin create <username>` and `admin reset <username>`: the only way to get
-/// console credentials. They are printed once, here.
+/// `admin create <username>` and `admin reset <username>`: print a one-time
+/// link that sets the password and the authenticator in the browser.
 async fn administrators(args: &[String], database_path: &str) -> anyhow::Result<()> {
     let [action, username] = args else {
         bail!(USAGE);
@@ -179,19 +186,42 @@ async fn administrators(args: &[String], database_path: &str) -> anyhow::Result<
             ManagedSettings::ENCRYPTION_KEY_ENV
         )
     })?;
+    let origin = public_origin()
+        .ok_or_else(|| anyhow!("{PUBLIC_ORIGIN_ENV} is required to print the setup link"))?;
     let service = AdminService::new(PoolConfig::new(database_path)?, &key, None)?;
-    let credentials = match action.as_str() {
-        "create" => service.create_admin(username).await?,
-        "reset" => service.reset_admin(username).await?,
+    let invitation = match action.as_str() {
+        "create" => service
+            .invite(username)
+            .await
+            .map_err(|error| match error {
+                AppError::Conflict => {
+                    anyhow!("{username} already exists; use `admin reset {username}`")
+                }
+                error => anyhow!("{username}: {error}"),
+            })?,
+        "reset" => service
+            .reset_admin(username)
+            .await
+            .map_err(|error| anyhow!("{username}: {error}"))?,
         _ => bail!(USAGE),
     };
-    println!("Administrator: {}", credentials.username);
-    println!("Password:      {}", credentials.password.expose());
-    println!("Authenticator secret (base32): {}", credentials.totp_secret);
-    println!("Authenticator link: {}", credentials.totp_uri);
-    println!();
+    if action == "reset" {
+        println!(
+            "{username} is signed out everywhere; the old password and authenticator no longer work."
+        );
+    }
     println!(
-        "Add the secret to your authenticator app, sign in at /admin and change the password under Security."
+        "Open this link once, before {} UTC, to set the password and scan the authenticator QR code:",
+        invitation.expires_at.format("%Y-%m-%d %H:%M")
     );
+    println!("{}", invitation.url(&origin));
     Ok(())
+}
+
+/// `ASYSTANT_PUBLIC_ORIGIN` without a trailing slash, when set.
+fn public_origin() -> Option<String> {
+    env::var(PUBLIC_ORIGIN_ENV)
+        .ok()
+        .map(|origin| origin.trim().trim_end_matches('/').to_string())
+        .filter(|origin| !origin.is_empty())
 }

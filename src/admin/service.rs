@@ -6,12 +6,13 @@ use uuid::Uuid;
 
 use crate::admin::credentials::{Passwords, Tokens, Totp};
 use crate::admin::model::{
-    AdminContext, AdminCredentials, AdminSession, AdminUser, AdminUsername, AttentionItem,
+    AdminContext, AdminSession, AdminSetupToken, AdminUser, AdminUsername, AttentionItem,
     AuditEvent, AuditPage, AuditResult, CompanyForm, CompanyPage, CompanyRow, CompanySettingsForm,
     CompanyToday, DayTotal, IssuedSession, KeyForm, LeaseView, Money, NewAuditEntry, OverviewPage,
-    PasswordForm, RecoveryForm, RequestOrigin, SecurityPage, SignInAttempt, SignInForm, SubjectRow,
-    SuspendForm, SystemView, TenantPage, TenantRow, TotpEnrollment, TotpStartForm, Usage,
-    WorkerView, WorkspaceForm, WorkspaceRow,
+    PasswordForm, RecoveryForm, RequestOrigin, SecurityPage, SetupCompletion, SetupForm,
+    SetupInvitation, SetupKind, SetupPage, SignInAttempt, SignInForm, SubjectRow, SuspendForm,
+    SystemView, TenantPage, TenantRow, TotpEnrollment, TotpStartForm, Usage, WorkerView,
+    WorkspaceForm, WorkspaceRow,
 };
 use crate::admin::repository::{AdminRepository, ReportRepository};
 use crate::crypto::Random;
@@ -45,6 +46,9 @@ impl AdminService {
     pub const SESSION_HOURS: i64 = 8;
     pub const LOCKOUT_MINUTES: i64 = 15;
     pub const LOCKOUT_ATTEMPTS: i64 = 5;
+    pub const SETUP_HOURS: i64 = 24;
+    /// The attempts table key of setup failures; never a valid username.
+    const SETUP_ATTEMPT: &'static str = "(setup)";
     const AUDIT_PAGE: i64 = 200;
 
     pub fn new(
@@ -81,55 +85,52 @@ impl AdminService {
     }
 
     // ------------------------------------------------------------------
-    // Administrators (command line)
+    // Administrators: one-time setup links
     // ------------------------------------------------------------------
 
-    pub async fn create_admin(&self, username: &str) -> Result<AdminCredentials, AppError> {
+    /// A link for a new administrator with this username (`admin create`).
+    pub async fn invite(&self, username: &str) -> Result<SetupInvitation, AppError> {
         AdminUsername::validate(username)?;
-        let (password, hash, secret, sealed) = self.fresh_credentials().await?;
-        let now = self.now();
-        let admin = AdminUser {
-            id: Uuid::new_v4().to_string(),
-            username: username.to_string(),
-            password_hash: hash,
-            totp_sealed: sealed,
-            totp_last_step: 0,
-            pending_totp_sealed: None,
-            created_at: now,
-            password_changed_at: now,
-            last_sign_in_at: None,
-            last_sign_in_source: None,
-            disabled_at: None,
-        };
-        self.pool
-            .blocking(move |pool| pool.insert_admin(&admin))
+        let (invitation, token) = self.setup_token_for(Some(username))?;
+        if !self
+            .pool
+            .blocking(move |pool| pool.issue_setup_token(&token))
+            .await?
+        {
+            return Err(AppError::Conflict);
+        }
+        self.record_setup_link(username, "New administrator")
             .await?;
-        self.record(
-            None,
-            &Self::console(),
-            AuditEvent {
-                action: "Administrator created",
-                company_id: None,
-                target: username,
-                detail: "From the command line",
-                result: AuditResult::Done,
-            },
-        )
-        .await?;
-        Ok(Self::credentials(username, password, &secret))
+        Ok(invitation)
     }
 
-    /// New password and authenticator; every open session ends.
-    pub async fn reset_admin(&self, username: &str) -> Result<AdminCredentials, AppError> {
-        AdminUsername::validate(username)?;
-        let (password, hash, secret, sealed) = self.fresh_credentials().await?;
-        let name = username.to_string();
-        let now = self.now();
-        let found = self
+    /// While no administrator exists, every start prints a fresh link; the
+    /// previous one stops working.
+    pub async fn first_run_invitation(&self) -> Result<Option<SetupInvitation>, AppError> {
+        let (invitation, token) = self.setup_token_for(None)?;
+        if !self
             .pool
-            .blocking(move |pool| pool.reset_admin(&name, &hash, &sealed, now))
+            .blocking(move |pool| pool.issue_setup_token(&token))
+            .await?
+        {
+            return Ok(None);
+        }
+        self.record_setup_link("First administrator", "At startup")
             .await?;
-        if !found {
+        Ok(Some(invitation))
+    }
+
+    /// Locks the account and ends its sessions now; the link sets a new
+    /// password and authenticator (`admin reset`).
+    pub async fn reset_admin(&self, username: &str) -> Result<SetupInvitation, AppError> {
+        AdminUsername::validate(username)?;
+        let (invitation, token) = self.setup_token_for(Some(username))?;
+        let now = self.now();
+        if !self
+            .pool
+            .blocking(move |pool| pool.start_reset(&token, now))
+            .await?
+        {
             return Err(AppError::NotFound);
         }
         self.record(
@@ -139,32 +140,190 @@ impl AdminService {
                 action: "Administrator reset",
                 company_id: None,
                 target: username,
-                detail: "New password and authenticator from the command line",
+                detail: "Signed out everywhere; a setup link was issued from the command line",
                 result: AuditResult::Done,
             },
         )
         .await?;
-        Ok(Self::credentials(username, password, &secret))
+        Ok(invitation)
     }
 
-    async fn fresh_credentials(
+    fn setup_token_for(
         &self,
-    ) -> Result<(ManagedSecret, String, Vec<u8>, Vec<u8>), AppError> {
-        let password = Passwords::generate()?;
-        let plain = password.clone();
-        let hash = self.pool.blocking(move |_| Passwords::hash(&plain)).await?;
-        let secret = Totp::generate_secret()?;
-        let sealed = self.vault.seal(&secret)?;
-        Ok((ManagedSecret::new(password)?, hash, secret, sealed))
+        username: Option<&str>,
+    ) -> Result<(SetupInvitation, AdminSetupToken), AppError> {
+        let token = Tokens::random()?;
+        let now = self.now();
+        let expires_at = now + Duration::hours(Self::SETUP_HOURS);
+        let row = AdminSetupToken {
+            token_hash: Tokens::hash(&token),
+            username: username.map(str::to_string),
+            totp_sealed: self.vault.seal(&Totp::generate_secret()?)?,
+            created_at: now,
+            expires_at,
+            used_at: None,
+        };
+        let invitation = SetupInvitation {
+            token: ManagedSecret::new(token)?,
+            expires_at,
+        };
+        Ok((invitation, row))
     }
 
-    fn credentials(username: &str, password: ManagedSecret, secret: &[u8]) -> AdminCredentials {
-        AdminCredentials {
-            username: username.to_string(),
-            password,
-            totp_secret: Totp::base32(secret),
-            totp_uri: Totp::provisioning_uri(Self::ISSUER, username, secret),
+    async fn record_setup_link(&self, target: &str, detail: &str) -> Result<(), AppError> {
+        self.record(
+            None,
+            &Self::console(),
+            AuditEvent {
+                action: "Setup link issued",
+                company_id: None,
+                target,
+                detail,
+                result: AuditResult::Done,
+            },
+        )
+        .await
+    }
+
+    /// The page behind a link. Reading it changes nothing.
+    pub async fn setup_page(&self, token: &str) -> Result<SetupPage, AppError> {
+        let (token, kind) = self.setup_state(token).await?;
+        let secret = self.vault.open(&token.totp_sealed)?;
+        let account = token.username.as_deref().unwrap_or("administrator");
+        Ok(SetupPage {
+            uri: Totp::provisioning_uri(Self::ISSUER, account, &secret),
+            secret: Totp::base32(&secret),
+            username: token.username,
+            kind,
+            expires_at: token.expires_at,
+        })
+    }
+
+    async fn setup_state(&self, token: &str) -> Result<(AdminSetupToken, SetupKind), AppError> {
+        if token.len() != 64 || !token.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Err(AppError::NotFound);
         }
+        let hash = Tokens::hash(token);
+        let now = self.now();
+        let (token, exists) = self
+            .pool
+            .blocking(move |pool| pool.setup_token(&hash, now))
+            .await?
+            .ok_or(AppError::NotFound)?;
+        let kind = match (&token.username, exists) {
+            (None, _) => SetupKind::First,
+            (Some(_), false) => SetupKind::Invitation,
+            (Some(_), true) => SetupKind::Reset,
+        };
+        Ok((token, kind))
+    }
+
+    /// Password and a first code from the new authenticator; the link is
+    /// consumed and the administrator is signed in.
+    pub async fn complete_setup(
+        &self,
+        form: &SetupForm,
+        origin: &RequestOrigin,
+    ) -> Result<IssuedSession, AppError> {
+        let now = self.now();
+        if self
+            .locked(Self::SETUP_ATTEMPT, &origin.source, now)
+            .await?
+        {
+            self.record(
+                None,
+                origin,
+                AuditEvent {
+                    action: "Setup refused",
+                    company_id: None,
+                    target: "Console",
+                    detail: "Locked: 5 failed attempts in 15 minutes",
+                    result: AuditResult::Refused,
+                },
+            )
+            .await?;
+            return Err(AppError::Limited);
+        }
+        let (token, kind) = match self.setup_state(&form.token).await {
+            Ok(state) => state,
+            Err(AppError::NotFound) => {
+                self.setup_refused(origin, "Unknown, used or expired link", now)
+                    .await?;
+                return Err(AppError::NotFound);
+            }
+            Err(error) => return Err(error),
+        };
+        let username = match &token.username {
+            Some(username) => username.clone(),
+            None => form.username.trim().to_lowercase(),
+        };
+        AdminUsername::validate(&username)?;
+        if form.password != form.password_confirm {
+            return Err(AppError::Invalid);
+        }
+        Passwords::validate(&form.password)?;
+        let secret = self.vault.open(&token.totp_sealed)?;
+        let Some(step) = Totp::verify(&secret, &form.code, now, 0) else {
+            self.setup_refused(origin, "Wrong authenticator code", now)
+                .await?;
+            return Err(AppError::Authentication);
+        };
+        let password = form.password.clone();
+        let password_hash = self
+            .pool
+            .blocking(move |_| Passwords::hash(&password))
+            .await?;
+        let completion = SetupCompletion {
+            token_hash: token.token_hash,
+            username,
+            admin_id: Uuid::new_v4().to_string(),
+            password_hash,
+            totp_step: step,
+            now,
+        };
+        let admin = self
+            .pool
+            .blocking(move |pool| pool.complete_setup(&completion))
+            .await?;
+        self.record(
+            Some(&admin.username),
+            origin,
+            AuditEvent {
+                action: match kind {
+                    SetupKind::First => "First administrator set up",
+                    SetupKind::Invitation => "Administrator set up",
+                    SetupKind::Reset => "Administrator reset completed",
+                },
+                company_id: None,
+                target: "Console",
+                detail: "Password and authenticator set in the browser",
+                result: AuditResult::Done,
+            },
+        )
+        .await?;
+        self.open_session(&admin, origin, now).await
+    }
+
+    async fn setup_refused(
+        &self,
+        origin: &RequestOrigin,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), AppError> {
+        self.record_attempt(Self::SETUP_ATTEMPT, &origin.source, false, now)
+            .await?;
+        self.record(
+            None,
+            origin,
+            AuditEvent {
+                action: "Setup refused",
+                company_id: None,
+                target: "Console",
+                detail: reason,
+                result: AuditResult::Refused,
+            },
+        )
+        .await
     }
 
     fn console() -> RequestOrigin {
@@ -185,15 +344,9 @@ impl AdminService {
     ) -> Result<IssuedSession, AppError> {
         let username = form.username.trim().to_lowercase();
         let now = self.now();
-        let since = now - Duration::minutes(Self::LOCKOUT_MINUTES);
-        let (name, source) = (username.clone(), origin.source.clone());
-        let (by_username, by_source) = self
-            .pool
-            .blocking(move |pool| pool.recent_failures(&name, &source, since))
-            .await?;
         let known = AdminUsername::validate(&username).is_ok();
         let actor = known.then(|| username.clone());
-        if by_username >= Self::LOCKOUT_ATTEMPTS || by_source >= Self::LOCKOUT_ATTEMPTS {
+        if self.locked(&username, &origin.source, now).await? {
             self.record(
                 actor.as_deref(),
                 origin,
@@ -235,15 +388,7 @@ impl AdminService {
         } else if actor.is_some() {
             reason = "Wrong username or password";
         }
-        let attempt = SignInAttempt {
-            id: Uuid::new_v4().to_string(),
-            username: username.clone(),
-            source: origin.source.clone(),
-            succeeded: signed_in.is_some(),
-            created_at: now,
-        };
-        self.pool
-            .blocking(move |pool| pool.record_attempt(&attempt))
+        self.record_attempt(&username, &origin.source, signed_in.is_some(), now)
             .await?;
         let Some(admin) = signed_in else {
             self.record(
@@ -260,6 +405,50 @@ impl AdminService {
             .await?;
             return Err(AppError::Authentication);
         };
+        self.open_session(&admin, origin, now).await
+    }
+
+    /// Five failures in 15 minutes for the username or the source address.
+    async fn locked(
+        &self,
+        username: &str,
+        source: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, AppError> {
+        let since = now - Duration::minutes(Self::LOCKOUT_MINUTES);
+        let (name, source) = (username.to_string(), source.to_string());
+        let (by_username, by_source) = self
+            .pool
+            .blocking(move |pool| pool.recent_failures(&name, &source, since))
+            .await?;
+        Ok(by_username >= Self::LOCKOUT_ATTEMPTS || by_source >= Self::LOCKOUT_ATTEMPTS)
+    }
+
+    async fn record_attempt(
+        &self,
+        username: &str,
+        source: &str,
+        succeeded: bool,
+        now: DateTime<Utc>,
+    ) -> Result<(), AppError> {
+        let attempt = SignInAttempt {
+            id: Uuid::new_v4().to_string(),
+            username: username.to_string(),
+            source: source.to_string(),
+            succeeded,
+            created_at: now,
+        };
+        self.pool
+            .blocking(move |pool| pool.record_attempt(&attempt))
+            .await
+    }
+
+    async fn open_session(
+        &self,
+        admin: &AdminUser,
+        origin: &RequestOrigin,
+        now: DateTime<Utc>,
+    ) -> Result<IssuedSession, AppError> {
         let token = Tokens::random()?;
         let session = AdminSession {
             id: Uuid::new_v4().to_string(),

@@ -56,11 +56,13 @@ operations. The default listener is `127.0.0.1:8787`; the container listens on `
 
 Without `OPENROUTER_MANAGEMENT_API_KEY` and `ASYSTANT_MANAGED_ENCRYPTION_KEY` the service starts,
 but `POST /v1/managed/credentials` answers 503 `managed_configuration_required`. The console also
-needs `ASYSTANT_PUBLIC_ORIGIN`; its first administrator is created from the shell:
+needs `ASYSTANT_PUBLIC_ORIGIN`. While no administrator exists, every start logs a one-time link
+(24 hours) where the first administrator chooses a username and password and scans the
+authenticator QR code. Other links come from the shell:
 
 ```sh
-asystant_api admin create <username>   # prints the password and authenticator secret once
-asystant_api admin reset <username>    # new password and authenticator, signs out every session
+asystant_api admin create <username>   # a setup link for another administrator
+asystant_api admin reset <username>    # locks the account, signs it out everywhere, prints a new link
 ```
 
 Version 0.4.0 replaced the single key per client with keys created in the console: API keys of
