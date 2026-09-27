@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2
+
+- Fix every console form being refused in browsers ("The form expired", sign-in
+  errors): under `Referrer-Policy: no-referrer` browsers post forms with
+  `Origin: null`, which the origin check rejects. Console pages now send
+  `Referrer-Policy: same-origin`, so setup links still never reach other sites.
+
 ## 0.4.1
 
 - Set up administrators in the browser through a one-time link (24 hours):

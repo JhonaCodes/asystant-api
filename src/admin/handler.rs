@@ -753,6 +753,10 @@ pub fn routes(config: &mut ServiceConfig) {
                         "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
                     ))
                     .add(("Cache-Control", "no-store"))
+                    // Under `no-referrer` browsers post forms with `Origin: null`,
+                    // which the origin check refuses; `same-origin` still keeps
+                    // setup links from leaking to other sites.
+                    .add(("Referrer-Policy", "same-origin"))
                     .add(("X-Frame-Options", "DENY"))
                     .add(("Cross-Origin-Opener-Policy", "same-origin"))
                     .add(("Cross-Origin-Resource-Policy", "same-origin"))

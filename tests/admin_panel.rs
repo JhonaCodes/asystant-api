@@ -159,6 +159,27 @@ fn cookie_named(response: &actix_web::dev::ServiceResponse, name: &str) -> Optio
         .map(|cookie| cookie.into_owned())
 }
 
+fn referrer_policy(response: &actix_web::dev::ServiceResponse) -> Option<String> {
+    response
+        .headers()
+        .get("Referrer-Policy")
+        .map(|value| value.to_str().unwrap().to_string())
+}
+
+/// The `Origin` a browser following the Fetch standard sends when it posts a
+/// form back to the page's own origin: `null` when the page's referrer policy
+/// (its `<meta name="referrer">`, else the header) is `no-referrer`.
+fn browser_origin(header: Option<String>, body: &str) -> &'static str {
+    let meta = body
+        .split("<meta name=\"referrer\" content=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next());
+    match meta.or(header.as_deref()) {
+        Some("no-referrer") => "null",
+        _ => ORIGIN,
+    }
+}
+
 fn location(response: &actix_web::dev::ServiceResponse) -> String {
     response
         .headers()
@@ -177,12 +198,13 @@ macro_rules! sign_in_as {
         )
         .await;
         let login_cookie = cookie_named(&page, "__Host-asystant_login").unwrap();
+        let policy = referrer_policy(&page);
         let body = String::from_utf8(test::read_body(page).await.to_vec()).unwrap();
         let response = test::call_service(
             $app,
             test::TestRequest::post()
                 .uri("/admin/login")
-                .insert_header(("Origin", ORIGIN))
+                .insert_header(("Origin", browser_origin(policy, &body)))
                 .cookie(login_cookie)
                 .set_form([
                     ("csrf", csrf_of(&body)),
@@ -439,13 +461,17 @@ macro_rules! set_up {
         let status = page.status();
         assert_eq!(status, StatusCode::OK, "the setup link opens its page");
         let login_cookie = cookie_named(&page, "__Host-asystant_login").unwrap();
+        let policy = referrer_policy(&page);
+        // The token in the URL never reaches another site, and the form keeps
+        // its Origin (the app-wide default elsewhere is `no-referrer`).
+        assert_eq!(policy.as_deref(), Some("same-origin"));
         let body = String::from_utf8(test::read_body(page).await.to_vec()).unwrap();
         let secret = base32_decode(between(&body, "class=\"secret\">", "<"));
         let response = test::call_service(
             $app,
             test::TestRequest::post()
                 .uri("/admin/setup")
-                .insert_header(("Origin", ORIGIN))
+                .insert_header(("Origin", browser_origin(policy, &body)))
                 .cookie(login_cookie)
                 .set_form([
                     ("csrf", csrf_of(&body)),

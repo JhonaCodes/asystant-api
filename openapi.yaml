@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "asystant-api Managed Keys API",
-    "version": "0.4.1",
+    "version": "0.4.2",
     "description": "Server-to-server API that gives client services (companies or products) short-lived, budget-limited OpenRouter keys for their users. Each client authenticates with its own key. Budgets are integer USD micros per tenant and subject; keys are created with the OpenRouter management API, sealed at rest, revoked when budgets drop and reconciled against confirmed usage. Maximum request body: 64 KiB.",
     "license": {
       "name": "MIT",
