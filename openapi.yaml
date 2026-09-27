@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "asystant-api Managed Keys API",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "Server-to-server API that gives client services (companies or products) short-lived, budget-limited OpenRouter keys for their users. Each client authenticates with its own key. Budgets are integer USD micros per tenant and subject; keys are created with the OpenRouter management API, sealed at rest, revoked when budgets drop and reconciled against confirmed usage. Maximum request body: 64 KiB.",
     "license": {
       "name": "MIT",
@@ -58,7 +58,7 @@
             }
           },
           "401": {
-            "description": "Missing, malformed or revoked client key.",
+            "description": "Missing, malformed, expired or revoked client key, or a suspended company.",
             "content": {
               "application/json": {
                 "schema": {
@@ -98,7 +98,7 @@
             }
           },
           "403": {
-            "description": "No budget is configured for this tenant or subject.",
+            "description": "No budget is configured for this tenant or subject, or the key lacks the permission this route needs (`credentials` needs issue, every budget route needs manage) or the call comes from an address the key does not allow.",
             "content": {
               "application/json": {
                 "schema": {
@@ -159,7 +159,7 @@
             }
           },
           "401": {
-            "description": "Missing, malformed or revoked client key.",
+            "description": "Missing, malformed, expired or revoked client key, or a suspended company.",
             "content": {
               "application/json": {
                 "schema": {
@@ -180,6 +180,16 @@
           },
           "503": {
             "description": "Service or database unavailable, or the managed flow is not configured (`code`: `managed_configuration_required`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden: the key lacks the permission this route needs (`credentials` needs issue, every budget route needs manage) or the call comes from an address the key does not allow.",
             "content": {
               "application/json": {
                 "schema": {
@@ -226,7 +236,7 @@
             }
           },
           "401": {
-            "description": "Missing, malformed or revoked client key.",
+            "description": "Missing, malformed, expired or revoked client key, or a suspended company.",
             "content": {
               "application/json": {
                 "schema": {
@@ -256,7 +266,7 @@
             }
           },
           "403": {
-            "description": "The workspace is not assigned to this client, or the workspace id is nil.",
+            "description": "The workspace is not assigned to this client, or the key lacks the permission this route needs (`credentials` needs issue, every budget route needs manage) or the call comes from an address the key does not allow.",
             "content": {
               "application/json": {
                 "schema": {
@@ -266,7 +276,7 @@
             }
           },
           "409": {
-            "description": "Subject budgets exceed the ceiling, or the workspace differs from existing budgets.",
+            "description": "Subject budgets exceed the ceiling, the company daily cap would be exceeded, or the workspace differs from existing budgets.",
             "content": {
               "application/json": {
                 "schema": {
@@ -339,7 +349,7 @@
             }
           },
           "401": {
-            "description": "Missing, malformed or revoked client key.",
+            "description": "Missing, malformed, expired or revoked client key, or a suspended company.",
             "content": {
               "application/json": {
                 "schema": {
@@ -369,7 +379,7 @@
             }
           },
           "403": {
-            "description": "The tenant ceiling is not configured yet.",
+            "description": "The tenant ceiling is not configured yet, or the key lacks the permission this route needs (`credentials` needs issue, every budget route needs manage) or the call comes from an address the key does not allow.",
             "content": {
               "application/json": {
                 "schema": {
@@ -451,7 +461,7 @@
             }
           },
           "401": {
-            "description": "Missing, malformed or revoked client key.",
+            "description": "Missing, malformed, expired or revoked client key, or a suspended company.",
             "content": {
               "application/json": {
                 "schema": {
@@ -491,7 +501,7 @@
             }
           },
           "403": {
-            "description": "The current policy does not allow the replacement.",
+            "description": "The current policy does not allow the replacement, or the key lacks the permission this route needs (`credentials` needs issue, every budget route needs manage) or the call comes from an address the key does not allow.",
             "content": {
               "application/json": {
                 "schema": {
@@ -596,7 +606,7 @@
       "clientKey": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Client key issued by asystant-api (`ask_` + 64 hex characters). Keep it in the client backend's secret manager; never send it to a browser or app."
+        "description": "Client key created in the operator console: `ask_live_` + 43 random base62 characters + a 6-character checksum. Each key carries permissions (issue credentials, manage budgets), an expiry and optional source addresses. Keep it in the client backend's secret manager; never send it to a browser or app."
       }
     },
     "schemas": {

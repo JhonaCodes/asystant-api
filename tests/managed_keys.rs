@@ -8,7 +8,7 @@ use asystant_api::{
     error::AppError,
     handler,
     managed::{
-        client_model::{CreatedClient, NewClientRequest},
+        client_model::{ManagedClient, NewClientRequest, NewKeyRequest, SourceRange},
         client_service::ClientService,
         credential_service::CredentialService,
         handler::ManagedState,
@@ -23,6 +23,7 @@ use asystant_api::{
         vault::ManagedKeyVault,
     },
     repository::PoolConfig,
+    source::SourceResolver,
 };
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -156,6 +157,7 @@ fn fixture() -> Fixture {
         clients: ClientService::new(pool.clone()),
         policies: PolicyService::new(pool.clone()),
         credentials: Some(CredentialService::new(pool.clone(), manager, vault, clock)),
+        sources: SourceResolver::default(),
     });
     Fixture {
         _dir: dir,
@@ -171,15 +173,49 @@ fn new_client(slug: &str, workspace: &str) -> NewClientRequest {
         name: slug.into(),
         workspaces: vec![Uuid::parse_str(workspace).unwrap()],
         allowed_models: vec![],
+        contact: None,
+        daily_cap_usd_micros: None,
     }
 }
 
-async fn client(state: &ManagedState, slug: &str, workspace: &str) -> CreatedClient {
-    state
+struct Client {
+    client: ManagedClient,
+    key: String,
+}
+
+impl Client {
+    fn key(&self) -> &str {
+        &self.key
+    }
+}
+
+/// A company with one key that may both issue credentials and manage budgets.
+async fn client(state: &ManagedState, slug: &str, workspace: &str) -> Client {
+    let client = state
         .clients
         .create(new_client(slug, workspace))
         .await
-        .unwrap()
+        .unwrap();
+    let created = state
+        .clients
+        .create_key(
+            &client,
+            NewKeyRequest {
+                label: "Backend".into(),
+                can_issue: true,
+                can_manage: true,
+                expires_in_days: 90,
+                allowed_sources: vec![],
+                replaces: None,
+                created_by: "test".into(),
+            },
+        )
+        .await
+        .unwrap();
+    Client {
+        client,
+        key: created.api_key.expose().to_string(),
+    }
 }
 
 fn request(method: &str, uri: &str, key: Option<&str>, body: Option<Value>) -> test::TestRequest {
@@ -276,7 +312,7 @@ async fn issues_one_provider_key_per_subject_and_day_and_reuses_it() {
     let fixture = fixture();
     let app = app!(fixture);
     let aulamas = client(&fixture.state, "aulamas", WORKSPACE).await;
-    let key = aulamas.api_key.expose();
+    let key = aulamas.key();
     budget!(&app, key, 1_000_000);
 
     let (first, first_body, cache) = call!(
@@ -331,7 +367,7 @@ async fn a_client_key_only_reaches_its_own_tenants_and_workspaces() {
     let app = app!(fixture);
     let aulamas = client(&fixture.state, "aulamas", WORKSPACE).await;
     let turnosqr = client(&fixture.state, "turnosqr", OTHER_WORKSPACE).await;
-    budget!(&app, aulamas.api_key.expose(), 1_000_000);
+    budget!(&app, aulamas.key(), 1_000_000);
 
     // A workspace belongs to one client only.
     assert!(matches!(
@@ -347,7 +383,7 @@ async fn a_client_key_only_reaches_its_own_tenants_and_workspaces() {
         request(
             "PUT",
             "/v1/managed/tenants/empresa-1/budget",
-            Some(turnosqr.api_key.expose()),
+            Some(turnosqr.key()),
             Some(
                 json!({"workspace_id": WORKSPACE, "bucket": "daily", "limit_usd_micros": 1_000_000, "actor": "operator-2"})
             ),
@@ -381,7 +417,7 @@ async fn a_client_key_only_reaches_its_own_tenants_and_workspaces() {
         request(
             "POST",
             "/v1/managed/credentials",
-            Some(turnosqr.api_key.expose()),
+            Some(turnosqr.key()),
             Some(credential_body())
         )
     );
@@ -391,7 +427,7 @@ async fn a_client_key_only_reaches_its_own_tenants_and_workspaces() {
         request(
             "GET",
             "/v1/managed/tenants/colegio-1/budget",
-            Some(turnosqr.api_key.expose()),
+            Some(turnosqr.key()),
             None
         )
     );
@@ -402,7 +438,7 @@ async fn a_client_key_only_reaches_its_own_tenants_and_workspaces() {
         request(
             "GET",
             "/v1/managed/tenants/colegio-1/budget",
-            Some(aulamas.api_key.expose()),
+            Some(aulamas.key()),
             None
         )
     );
@@ -412,7 +448,7 @@ async fn a_client_key_only_reaches_its_own_tenants_and_workspaces() {
     let revoked = fixture
         .state
         .clients
-        .revoke(Uuid::parse_str(&aulamas.client.id).unwrap())
+        .suspend(&aulamas.client)
         .await
         .unwrap();
     assert!(revoked);
@@ -421,7 +457,7 @@ async fn a_client_key_only_reaches_its_own_tenants_and_workspaces() {
         request(
             "GET",
             "/v1/managed/tenants/colegio-1/budget",
-            Some(aulamas.api_key.expose()),
+            Some(aulamas.key()),
             None
         )
     );
@@ -433,7 +469,7 @@ async fn lowering_a_subject_budget_disables_its_provider_key() {
     let fixture = fixture();
     let app = app!(fixture);
     let aulamas = client(&fixture.state, "aulamas", WORKSPACE).await;
-    let key = aulamas.api_key.expose();
+    let key = aulamas.key();
     budget!(&app, key, 1_000_000);
     let (issued, _, _) = call!(
         &app,
@@ -474,7 +510,7 @@ async fn confirmed_usage_settles_both_budgets_once_and_rounds_up() {
     let fixture = fixture();
     let app = app!(fixture);
     let aulamas = client(&fixture.state, "aulamas", WORKSPACE).await;
-    let key = aulamas.api_key.expose();
+    let key = aulamas.key();
     budget!(&app, key, 1_000_000);
     let (issued, _, _) = call!(
         &app,
@@ -518,7 +554,7 @@ async fn an_uncertain_issuance_is_recovered_and_its_hidden_key_revoked_by_name()
     let fixture = fixture();
     let app = app!(fixture);
     let aulamas = client(&fixture.state, "aulamas", WORKSPACE).await;
-    let key = aulamas.api_key.expose();
+    let key = aulamas.key();
     budget!(&app, key, 1_000_000);
     fixture.fake.then(Creation::LostResponse);
 
@@ -606,7 +642,7 @@ async fn a_rejected_creation_returns_the_claim_for_a_retry() {
     let fixture = fixture();
     let app = app!(fixture);
     let aulamas = client(&fixture.state, "aulamas", WORKSPACE).await;
-    let key = aulamas.api_key.expose();
+    let key = aulamas.key();
     budget!(&app, key, 1_000_000);
     fixture.fake.then(Creation::Rejected);
 
@@ -658,4 +694,48 @@ async fn published_contract_documents_every_managed_route() {
         );
     }
     assert!(contract["paths"].get("/v1/turns").is_none());
+}
+
+#[actix_rt::test]
+async fn a_key_limited_to_source_addresses_refuses_every_other_address() {
+    let fixture = fixture();
+    let app = app!(fixture);
+    let client = fixture
+        .state
+        .clients
+        .create(new_client("aulamas", WORKSPACE))
+        .await
+        .unwrap();
+    let created = fixture
+        .state
+        .clients
+        .create_key(
+            &client,
+            NewKeyRequest {
+                label: "Operations".into(),
+                can_issue: false,
+                can_manage: true,
+                expires_in_days: 30,
+                allowed_sources: vec![SourceRange::parse("10.0.0.0/8").unwrap()],
+                replaces: None,
+                created_by: "test".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let key = created.api_key.expose();
+    let from = |address: [u8; 4]| {
+        request(
+            "GET",
+            "/v1/managed/tenants/colegio-1/budget",
+            Some(key),
+            None,
+        )
+        .peer_addr((address, 40_000).into())
+    };
+
+    let (outside, _, _) = call!(&app, from([203, 0, 113, 9]));
+    assert_eq!(outside, StatusCode::FORBIDDEN);
+    let (inside, view, _) = call!(&app, from([10, 1, 2, 3]));
+    assert_eq!(inside, StatusCode::OK, "{view}");
 }

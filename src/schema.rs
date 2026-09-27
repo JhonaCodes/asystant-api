@@ -3,10 +3,87 @@ diesel::table! {
         id -> Text,
         slug -> Text,
         name -> Text,
-        key_hash -> Text,
         allowed_models -> Text,
+        contact -> Nullable<Text>,
+        daily_cap_usd_micros -> Nullable<BigInt>,
         created_at -> TimestamptzSqlite,
+        suspended_at -> Nullable<TimestamptzSqlite>,
+    }
+}
+
+diesel::table! {
+    managed_client_keys (id) {
+        id -> Text,
+        client_id -> Text,
+        label -> Text,
+        display_prefix -> Text,
+        display_suffix -> Text,
+        key_hash -> Text,
+        can_issue -> Bool,
+        can_manage -> Bool,
+        allowed_sources -> Text,
+        created_by -> Text,
+        created_at -> TimestamptzSqlite,
+        expires_at -> TimestamptzSqlite,
+        replaced_by -> Nullable<Text>,
         revoked_at -> Nullable<TimestamptzSqlite>,
+        last_used_at -> Nullable<TimestamptzSqlite>,
+        last_used_source -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    admin_users (id) {
+        id -> Text,
+        username -> Text,
+        password_hash -> Text,
+        totp_sealed -> Binary,
+        totp_last_step -> BigInt,
+        pending_totp_sealed -> Nullable<Binary>,
+        created_at -> TimestamptzSqlite,
+        password_changed_at -> TimestamptzSqlite,
+        last_sign_in_at -> Nullable<TimestamptzSqlite>,
+        last_sign_in_source -> Nullable<Text>,
+        disabled_at -> Nullable<TimestamptzSqlite>,
+    }
+}
+
+diesel::table! {
+    admin_sessions (id) {
+        id -> Text,
+        token_hash -> Text,
+        admin_id -> Text,
+        csrf_token -> Text,
+        user_agent -> Text,
+        source -> Text,
+        created_at -> TimestamptzSqlite,
+        last_seen_at -> TimestamptzSqlite,
+        expires_at -> TimestamptzSqlite,
+        revoked_at -> Nullable<TimestamptzSqlite>,
+    }
+}
+
+diesel::table! {
+    admin_sign_in_attempts (id) {
+        id -> Text,
+        username -> Text,
+        source -> Text,
+        succeeded -> Bool,
+        created_at -> TimestamptzSqlite,
+    }
+}
+
+diesel::table! {
+    admin_audit_log (id) {
+        id -> BigInt,
+        created_at -> TimestamptzSqlite,
+        actor -> Nullable<Text>,
+        action -> Text,
+        company_id -> Nullable<Text>,
+        target -> Text,
+        detail -> Text,
+        source -> Text,
+        result -> Text,
     }
 }
 

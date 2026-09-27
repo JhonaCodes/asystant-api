@@ -417,7 +417,7 @@ impl PoolConfig {
     ) -> Result<ManagedClient, AppError> {
         clients::managed_clients
             .filter(clients::id.eq(client.to_string()))
-            .filter(clients::revoked_at.is_null())
+            .filter(clients::suspended_at.is_null())
             .select(ManagedClient::as_select())
             .first::<ManagedClient>(conn)
             .optional()?

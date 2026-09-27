@@ -108,7 +108,7 @@ impl ManagedPolicyRepository for PoolConfig {
         // The immediate transaction serializes the whole tenant distribution,
         // including its first row, against issuance.
         self.conn()?.immediate_transaction(|conn| {
-            Self::active_managed_client(conn, change.client_id)?;
+            let client = Self::active_managed_client(conn, change.client_id)?;
             let current = policies::managed_policies
                 .filter(policies::client_id.eq(&client_id))
                 .filter(policies::tenant.eq(&change.tenant))
@@ -150,6 +150,18 @@ impl ManagedPolicyRepository for PoolConfig {
                 .ok_or(AppError::Conflict)?;
             if change.owner_kind == OWNER_TENANT {
                 ManagedPolicyRules::validate_distribution(change.limit_usd_micros, others, 0)?;
+                // The company cap bounds the sum of its daily tenant ceilings.
+                if let (Some(cap), ManagedUsageBucket::Daily) =
+                    (client.daily_cap_usd_micros, change.bucket)
+                {
+                    let siblings =
+                        Self::daily_tenant_ceilings(conn, &client_id, Some(&change.tenant))?;
+                    ManagedPolicyRules::validate_distribution(
+                        cap,
+                        siblings,
+                        change.limit_usd_micros,
+                    )?;
+                }
             } else {
                 let ceiling = tenant_policy.ok_or(AppError::Forbidden)?.limit_usd_micros;
                 ManagedPolicyRules::validate_distribution(

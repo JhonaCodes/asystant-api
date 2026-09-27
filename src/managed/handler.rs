@@ -5,12 +5,13 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::managed::client_model::ManagedClient;
+use crate::managed::client_model::{KeyPermission, ManagedClient};
 use crate::managed::client_service::ClientService;
 use crate::managed::credential_service::CredentialService;
 use crate::managed::model::{ManagedCredentialRequest, ManagedFailureKind};
 use crate::managed::policy_model::{ManagedRecoveryRequest, SubjectBudgetRequest, TenantBudgetRequest};
 use crate::managed::policy_service::PolicyService;
+use crate::source::SourceResolver;
 
 /// Maximum JSON body of a managed request.
 pub const REQUEST_LIMIT: usize = 64 * 1024;
@@ -21,16 +22,28 @@ pub struct ManagedState {
     pub clients: ClientService,
     pub policies: PolicyService,
     pub credentials: Option<CredentialService>,
+    pub sources: SourceResolver,
 }
 
-async fn client(request: &HttpRequest, state: &ManagedState) -> Result<ManagedClient, AppError> {
+/// The client of this call, if its key holds `permission` and the call comes
+/// from an address the key allows.
+async fn client(
+    request: &HttpRequest,
+    state: &ManagedState,
+    permission: KeyPermission,
+) -> Result<ManagedClient, AppError> {
     let key = request
         .headers()
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .ok_or(AppError::Authentication)?;
-    state.clients.authenticate(key).await
+    let source = state.sources.resolve(request);
+    Ok(state
+        .clients
+        .authenticate(key, permission, source)
+        .await?
+        .client)
 }
 
 fn no_store(body: &impl Serialize) -> HttpResponse {
@@ -44,7 +57,7 @@ async fn issue_credential(
     state: Data<ManagedState>,
     input: Json<ManagedCredentialRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let client = client(&request, &state).await?;
+    let client = client(&request, &state, KeyPermission::Issue).await?;
     let credentials = state
         .credentials
         .as_ref()
@@ -59,7 +72,7 @@ async fn tenant_budget(
     state: Data<ManagedState>,
     tenant: Path<String>,
 ) -> Result<HttpResponse, AppError> {
-    let client = client(&request, &state).await?;
+    let client = client(&request, &state, KeyPermission::Manage).await?;
     Ok(no_store(
         &state
             .policies
@@ -74,7 +87,7 @@ async fn set_tenant_budget(
     tenant: Path<String>,
     input: Json<TenantBudgetRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let client = client(&request, &state).await?;
+    let client = client(&request, &state, KeyPermission::Manage).await?;
     Ok(no_store(
         &state
             .policies
@@ -89,7 +102,7 @@ async fn set_subject_budget(
     path: Path<(String, String)>,
     input: Json<SubjectBudgetRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let client = client(&request, &state).await?;
+    let client = client(&request, &state, KeyPermission::Manage).await?;
     let (tenant, subject) = path.into_inner();
     Ok(no_store(
         &state
@@ -105,7 +118,7 @@ async fn authorize_recovery(
     path: Path<(String, Uuid)>,
     input: Json<ManagedRecoveryRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let client = client(&request, &state).await?;
+    let client = client(&request, &state, KeyPermission::Manage).await?;
     let (tenant, lease) = path.into_inner();
     Ok(no_store(
         &state

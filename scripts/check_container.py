@@ -48,8 +48,8 @@ def main():
         assert run("docker", "exec", api, "id", "-u").stdout.strip() == "10001"
         assert run("docker", "exec", api, "sqlite3", "/data/asystant.db", "PRAGMA journal_mode;").stdout.strip() == "wal"
         run("docker", "exec", api, "sqlite3", "/data/asystant.db",
-            "INSERT INTO managed_clients (id, slug, name, key_hash, allowed_models, created_at) "
-            f"VALUES ('persistence-test', 'persistence-test', 'Persistence', '{'a' * 64}', '[]', "
+            "INSERT INTO managed_clients (id, slug, name, allowed_models, created_at) "
+            "VALUES ('persistence-test', 'persistence-test', 'Persistence', '[]', "
             "'2026-01-01 00:00:00+00:00');")
         run("docker", "exec", api, "sqlite3", "/data/asystant.db", ".backup /data/backup.db")
         run("docker", "rm", "-f", api)

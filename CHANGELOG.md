@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0
+
+- Add the operator console at `/admin` (served on `ai.jhonacode.com`):
+  server-rendered HTML without JavaScript to create companies, hand out their
+  API keys, follow spend per company and tenant, authorize recoveries, suspend
+  companies and export monthly spend as CSV.
+- Protect it with argon2id passwords plus single-use TOTP codes, `__Host-`
+  session cookies (30 minutes idle, 8 hours total), per-session CSRF tokens and
+  an `Origin` check, a lockout after five failures in 15 minutes, a fresh code
+  for every change, a strict CSP and an append-only audit log enforced by
+  SQLite triggers. Administrators are created only from the shell
+  (`asystant_api admin create|reset <username>`).
+- Replace the single key per client with several API keys per company:
+  `ask_live_` + 256 random bits + a checksum, with issue/manage permissions, a
+  mandatory expiry, optional source addresses, last use, revocation and
+  rotation with a 7-day overlap.
+- Add an optional company daily cap that bounds the sum of its daily tenant
+  ceilings, and company suspension that rejects its keys and revokes its live
+  OpenRouter keys.
+- Add `ASYSTANT_PUBLIC_ORIGIN` (required for the console, turns on HSTS for
+  HTTPS) and `ASYSTANT_CLIENT_IP_HEADER` (the caller address behind a proxy).
+- Migration `0003_operator_console` removes the 0.3.0 key column: API keys of
+  0.3.0 stop working and must be recreated in the console.
+
 ## 0.3.0
 
 - Issue managed OpenRouter keys to client services: per-client keys (`ask_…`,

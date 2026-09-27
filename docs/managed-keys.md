@@ -9,23 +9,41 @@ as opaque text of up to 200 characters.
 The client is the authority on who its users are. asystant-api is the authority on money: amounts
 always come from the stored policies, never from the request.
 
-## Client keys
+## Companies and API keys
 
-A client has a unique `slug` (2–40 lowercase letters, digits or hyphens), a name, the OpenRouter
-workspaces it may use (1–64) and the list of models it may advertise to its apps (default
-`openai/gpt-oss-120b`). A workspace belongs to exactly one client: assigning it to a second client
-is rejected, so no client can place keys inside another company's workspace. Its key is `ask_` plus
-64 hex characters, shown once at creation. Only its SHA-256 is stored, so a lost key cannot be
-recovered: create a new client.
+Companies are created in the [operator console](operator-console.md). A company has a unique `slug`
+(2–40 lowercase letters, digits or hyphens; it prefixes every OpenRouter key name), a name, the
+OpenRouter workspaces it may use (1–64), the models it may advertise to its apps (default
+`openai/gpt-oss-120b`), an optional contact and an optional **daily cap**. A workspace belongs to
+exactly one company: assigning it to a second one is rejected, so no company can place keys inside
+another company's workspace.
 
-Every `/v1/managed` route requires `Authorization: Bearer <client key>`. Every query is scoped by
-the authenticated client, so a client never reads nor changes another client's tenants, budgets or
-keys. Revoking a client rejects its key at once and queues all its live OpenRouter keys for
-revocation.
+A company can hold several **API keys**, also created in the console:
 
-There is no HTTP or command-line surface to create clients yet: `ClientService::create` exists and
-is covered by tests, and the administration panel will expose it. Until then no client can call
-the API.
+- Format `ask_live_` + 43 base62 characters (256 random bits) + a 6-character checksum. Shown once;
+  only its SHA-256 is stored, so a lost key cannot be recovered: create another one.
+- **Permissions**: *issue* allows `POST /v1/managed/credentials`; *manage* allows the budget,
+  overview and recovery routes. A key without the permission a route needs gets 403.
+- **Expiry**: 30, 90, 180 or 365 days. An expired key gets 401.
+- **Source addresses** (optional, up to 32 IPs or CIDR ranges): a call from any other address gets
+  403. Behind a proxy this needs `ASYSTANT_CLIENT_IP_HEADER`.
+- **Rotation**: a new key can replace an existing one; the old key keeps working for 7 more days so
+  the company can deploy the new one without downtime.
+- **Revocation** takes effect on the next request. The console shows the last use and its address.
+
+Every `/v1/managed` route requires `Authorization: Bearer <API key>`. Every query is scoped by the
+authenticated company, so a company never reads nor changes another company's tenants, budgets or
+keys. **Suspending** a company rejects all its API keys at once and queues all its live OpenRouter
+keys for revocation; after reactivating it, it needs new API keys.
+
+A company integrates with one HTTP call from its backend; no SDK is needed:
+
+```sh
+curl -X POST https://ai.jhonacode.com/v1/managed/credentials \
+  -H "Authorization: Bearer $ASYSTANT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"tenant":"school-42","subject":"teacher-7","bucket":"daily"}'
+```
 
 ## Budgets
 
@@ -41,7 +59,9 @@ Rules:
   exceed it (409).
 - The tenant workspace must be one assigned to the client (403) and cannot change once budgets
   exist (409).
-- The client sets its own ceilings; there is no per-client maximum yet.
+- The company sets its own ceilings. When it has a daily cap, the sum of its `daily` tenant ceilings
+  can never exceed it (409); `migration` ceilings are outside the cap. Lowering a cap below the
+  current sum is refused in the console.
 - Each change stores who made it (`actor`) in an audit event. Repeating the same value is a no-op.
 - **Lowering** a ceiling queues every live key of the tenant for revocation; lowering a subject
   budget queues that subject's key. Set a subject to 0 to stop issuing to them.
@@ -118,9 +138,10 @@ is confirmed. Repeating the same authorization returns the stored recovery.
 | Variable | Purpose |
 | --- | --- |
 | `OPENROUTER_MANAGEMENT_API_KEY` | OpenRouter management (provisioning) key of the organization that owns the workspaces. It creates, reads and disables keys; it cannot run inference |
-| `ASYSTANT_MANAGED_ENCRYPTION_KEY` | 32 random bytes in base64 (`openssl rand -base64 32`) that seal issued keys |
+| `ASYSTANT_MANAGED_ENCRYPTION_KEY` | 32 random bytes in base64 (`openssl rand -base64 32`) that seal issued keys and the administrators' authenticator secrets |
+| `ASYSTANT_CLIENT_IP_HEADER` | Optional: the header the edge proxy overwrites with the caller address, for key source ranges |
 
-Both or neither. Rotating the encryption key makes the day's stored keys unreadable: those subjects
+The two managed variables go together, or neither. Rotating the encryption key makes the day's stored keys unreadable: those subjects
 get a 503 until their keys expire at the end of the UTC day and the worker revokes them. Rotate at a
 day boundary.
 
@@ -130,9 +151,9 @@ This flow is the one AulaMás runs inside its own backend (`aula_ai` managed key
 like that onto asystant-api, without breaking its apps:
 
 1. **Deploy** asystant-api with the same OpenRouter management organization and a new encryption
-   key. Create the client (slug `aulamas` keeps the key names identical) with the workspaces its
-   institutions already use, and store its key in the service as `ASYSTANT_API_URL` and
-   `ASYSTANT_API_KEY`.
+   key. In the console, create the company (slug `aulamas` keeps the key names identical) with the
+   workspaces its institutions already use and an API key with both permissions, and store it in the
+   service as `ASYSTANT_API_URL` and `ASYSTANT_API_KEY`.
 2. **Copy the policies**: for each institution, call the tenant `PUT` with its ceiling and
    workspace; for each teacher, the subject `PUT`. For the `migration` bucket, load as ceiling the
    remaining balance at cut-over (`limit - spent - reserved`), so no budget is replenished.

@@ -25,18 +25,32 @@ Set these runtime environment variables in Dokploy (not Docker build arguments):
 - `OPENROUTER_MANAGEMENT_API_KEY`: OpenRouter management (provisioning) key of the
   organization that owns the tenants' workspaces, stored as a secret.
 - `ASYSTANT_MANAGED_ENCRYPTION_KEY`: 32 random bytes in base64 that seal issued
-  keys (`openssl rand -base64 32`), stored as a secret. Keep it for the life of
-  the volume; rotate only at a UTC day boundary.
+  keys and the administrators' authenticator secrets (`openssl rand -base64 32`),
+  stored as a secret. Keep it for the life of the volume; rotate only at a UTC
+  day boundary, and run `admin reset` for every administrator afterwards.
+- `ASYSTANT_PUBLIC_ORIGIN=https://ai.jhonacode.com`: the public origin of the
+  operator console. Without it `/admin` stays off. An `https://` origin also
+  turns on HSTS.
+- `ASYSTANT_CLIENT_IP_HEADER` (optional): the header your proxy always
+  overwrites with the caller address, for example `CF-Connecting-IP` behind
+  Cloudflare or `X-Real-IP` behind Traefik configured to set it. Without it,
+  every caller looks like the proxy. Set it only when the container port is not
+  reachable except through that proxy.
 
 Set both managed variables or neither; without them the service starts but does
-not issue keys. Use [.env.example](../.env.example) as a template. Placeholder
-secrets must be replaced. Never commit actual secrets or SQLite files.
+not issue keys and the console stays off. Use [.env.example](../.env.example) as
+a template. Placeholder secrets must be replaced. Never commit actual secrets or
+SQLite files.
 
 Remove the variables of the removed ticket/session gateway before deploying
 0.3.0: `ASYSTANT_PRODUCTS`, `ASYSTANT_MODELS`, `ASYSTANT_ORIGINS`,
 `ASYSTANT_ADMIN_TOKEN` and `OPENROUTER_API_KEY`. Startup refuses them so a
 deployment that still depends on that flow fails instead of serving 404s. The
 first start of 0.3.0 drops that flow's tables from the existing volume.
+
+The first start of 0.4.0 applies migration `0003_operator_console`: it moves
+companies to keys created in the console, so API keys of 0.3.0 stop working.
+Create new keys in the console and deploy them to each company.
 
 Leave the start command unchanged. The default process applies embedded
 migrations before starting HTTP. For manual operations, `--migrate-only` applies
@@ -46,14 +60,33 @@ container before starting its replacement (no rolling overlap).
 
 ## Domain and client integration
 
-Add your HTTPS domain in Dokploy, pointing to container port 8787. Configure
-request/header timeouts above 45 seconds (a key creation can take up to 40) and
-shared admission limits. Restrict direct access to the container port. Do not
-expose the volume through a web server.
+Add your HTTPS domain in Dokploy (`ai.jhonacode.com`), pointing to container
+port 8787. The same domain serves the API under `/v1` and the console under
+`/admin`; `/` redirects to the console. Configure request/header timeouts above
+45 seconds (a key creation can take up to 40) and shared admission limits.
+Restrict direct access to the container port. Do not expose the volume through
+a web server. An access gate in front of `/admin` at the edge (for example
+Cloudflare Access) is recommended.
 
-Each client service stores this HTTPS origin and its client key in its own
-secret manager (for example `ASYSTANT_API_URL` and `ASYSTANT_API_KEY`) and calls
-the API only from its backend. See [managed keys](managed-keys.md).
+## First administrator
+
+After the first deployment, open a shell in the container and create the
+administrator:
+
+```sh
+docker exec -it CONTAINER asystant_api admin create jhonacode
+```
+
+The command prints a random password and the authenticator secret once. Add the
+secret to an authenticator app, sign in at `https://ai.jhonacode.com/admin` and
+change the password under **Security**. `admin reset <username>` issues new
+credentials and signs out every session of that administrator. See
+[operator console](operator-console.md).
+
+Each company stores this HTTPS origin and the API key created for it in the
+console in its own secret manager (for example `ASYSTANT_API_URL` and
+`ASYSTANT_API_KEY`) and calls the API only from its backend. See
+[managed keys](managed-keys.md).
 
 Health endpoints:
 
@@ -61,10 +94,11 @@ Health endpoints:
 - `/health/ready`: database and migrated schema are accessible.
 - `/openapi.yaml`: public API specification without keys or client data.
 
-Health does not validate the OpenRouter management key. Once a client exists
-(its creation surface comes with the administration panel), and before enabling
-users, set a small tenant and subject budget, issue a credential, lower the
-budget and check that the worker disables the key in the OpenRouter workspace.
+Health does not validate the OpenRouter management key; the console's
+**Security** page shows when the worker last reached OpenRouter. Once a company
+exists, and before enabling users, set a small tenant and subject budget, issue
+a credential, lower the budget and check that the worker disables the key in the
+OpenRouter workspace.
 
 ## Backup, restore and failure handling
 
@@ -77,8 +111,8 @@ docker exec CONTAINER sqlite3 /data/asystant.db '.backup /data/asystant-backup.d
 docker cp CONTAINER:/data/asystant-backup.db ./asystant-backup.db
 ```
 
-Protect backups as sensitive data: they hold sealed provider keys and client key
-hashes. Remove temporary snapshots only after confirming off-volume backup
+Protect backups as sensitive data: they hold sealed provider keys, API key
+hashes, administrator password hashes and sealed authenticator secrets. Remove temporary snapshots only after confirming off-volume backup
 success. For restore, stop the application, preserve the current volume for
 recovery, restore into a fresh volume owned by 10001:10001, and start one
 instance. Never combine a restored DB with old `-wal`/`-shm` files. Restoring an
