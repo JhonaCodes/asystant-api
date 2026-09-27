@@ -1,12 +1,7 @@
-pub mod admin;
 pub mod admission;
-pub mod config;
 pub mod error;
 pub mod handler;
-pub mod model;
-pub mod origins;
-pub mod prompt_policy;
-pub mod provider;
+pub mod health;
+pub mod managed;
 pub mod repository;
 pub mod schema;
-pub mod service;

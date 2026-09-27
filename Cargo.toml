@@ -1,30 +1,31 @@
 [package]
 name = "asystant_api"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/JhonaCodes/asystant-api"
-description = "Session-backed inference gateway for embedded assistants with local tools"
+description = "Managed OpenRouter keys for client services: per-tenant budgets, daily provider keys, revocation and usage reconciliation"
 
 [dependencies]
 async-trait = "0.1"
-actix-web = { version = "4", default-features = false, features = ["macros", "cookies"] }
-actix-cors = "0.7"
+actix-web = { version = "4", default-features = false, features = ["macros"] }
 anyhow = "1"
+base64 = "0.22.1"
+bigdecimal = "0.4.9"
+chacha20poly1305 = { version = "0.11.0", features = ["getrandom", "rand_core"] }
 chrono = { version = "0.4", features = ["serde"] }
-diesel = { version = "2.3", features = ["sqlite", "r2d2", "chrono"] }
+diesel = { version = "2.3", features = ["sqlite", "r2d2", "chrono", "returning_clauses_for_sqlite_3_35"] }
 diesel_migrations = "2.3"
-libsqlite3-sys = { version = "0.38", features = ["bundled"] }
+env_logger = "0.11.9"
 futures-util = "0.3"
-jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+libsqlite3-sys = { version = "0.38", features = ["bundled"] }
+log = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-tokio-stream = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]

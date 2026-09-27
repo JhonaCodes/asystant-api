@@ -13,30 +13,43 @@ use actix_web::{
 };
 use crate::error::AppError;
 
-/// Process-local admission guard. A trusted ingress must also enforce shared limits.
-#[derive(Default)]
+/// Process-local admission guard. A trusted ingress must also enforce shared
+/// limits. Callers are client backends acting for all their users, often from
+/// a single address, so the per-peer window is wide.
 pub struct Admission {
-    windows: Mutex<HashMap<(IpAddr, bool), Window>>,
+    limit: u32,
+    windows: Mutex<HashMap<IpAddr, Window>>,
 }
 struct Window {
     start: Instant,
     count: u32,
 }
+impl Default for Admission {
+    fn default() -> Self {
+        Self::with_limit(Self::DEFAULT_LIMIT)
+    }
+}
 impl Admission {
-    pub fn check(&self, peer: IpAddr, exchange: bool) -> Result<(), AppError> {
+    pub const DEFAULT_LIMIT: u32 = 3000;
+
+    pub fn with_limit(limit: u32) -> Self {
+        Self {
+            limit,
+            windows: Mutex::new(HashMap::new()),
+        }
+    }
+    pub fn check(&self, peer: IpAddr) -> Result<(), AppError> {
         let now = Instant::now();
         let mut windows = self.windows.lock().map_err(|_| AppError::Internal)?;
         windows.retain(|_, window| now.duration_since(window.start) < Duration::from_secs(60));
-        let key = (peer, exchange);
-        if !windows.contains_key(&key) && windows.len() >= 10_000 {
+        if !windows.contains_key(&peer) && windows.len() >= 10_000 {
             return Err(AppError::Limited);
         }
-        let window = windows.entry(key).or_insert(Window {
+        let window = windows.entry(peer).or_insert(Window {
             start: now,
             count: 0,
         });
-        let limit = if exchange { 10 } else { 120 };
-        if window.count >= limit {
+        if window.count >= self.limit {
             return Err(AppError::Limited);
         }
         window.count += 1;
@@ -54,7 +67,7 @@ pub async fn enforce(
         let admission = request
             .app_data::<web::Data<Admission>>()
             .ok_or(AppError::Internal)?;
-        admission.check(peer, request.path() == "/v1/sessions/exchange")?;
+        admission.check(peer)?;
     }
     next.call(request).await
 }

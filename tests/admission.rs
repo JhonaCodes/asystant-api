@@ -5,36 +5,31 @@ use asystant_api::{
     error::AppError,
 };
 
-#[test]
-async fn limits_exchange_attempts_and_separates_peers() {
-    let guard = Admission::default();
+#[actix_web::test]
+async fn limits_each_peer_separately() {
+    let guard = Admission::with_limit(10);
     let first = IpAddr::V4(Ipv4Addr::LOCALHOST);
     for _ in 0..10 {
-        assert!(guard.check(first, true).is_ok());
+        assert!(guard.check(first).is_ok());
     }
-    assert!(matches!(guard.check(first, true), Err(AppError::Limited)));
-    assert!(guard.check(first, false).is_ok());
-    assert!(
-        guard
-            .check(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), true)
-            .is_ok()
-    );
+    assert!(matches!(guard.check(first), Err(AppError::Limited)));
+    assert!(guard.check(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))).is_ok());
 }
 
 #[actix_web::test]
 async fn forwarded_headers_cannot_bypass_peer_limit() {
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(Admission::default()))
+            .app_data(web::Data::new(Admission::with_limit(10)))
             .wrap(from_fn(admission::enforce))
-            .route("/v1/sessions/exchange", web::post().to(|| async { "ok" })),
+            .route("/v1/managed/credentials", web::post().to(|| async { "ok" })),
     )
     .await;
     for index in 0..11 {
         let result = test::try_call_service(
             &app,
             test::TestRequest::post()
-                .uri("/v1/sessions/exchange")
+                .uri("/v1/managed/credentials")
                 .peer_addr(([127, 0, 0, 1], 12345).into())
                 .insert_header(("X-Forwarded-For", format!("192.0.2.{index}")))
                 .to_request(),

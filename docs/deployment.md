@@ -14,35 +14,29 @@ be writable: SQLite also creates WAL and shared-memory files next to the DB.
 Do not mount just the database file, use temporary storage, or share the volume
 with another replica. Use a local disk, not NFS/SMB.
 
-Remove the old `DATABASE_URL` variable; startup rejects it to prevent an
-accidental silent switch from PostgreSQL to an empty SQLite database. Limit
-bind-mount directory permissions to the service owner (`0700`).
+`DATABASE_URL` is rejected at startup to prevent an accidental silent switch
+from PostgreSQL to an empty SQLite database. Limit bind-mount directory
+permissions to the service owner (`0700`).
 
 Set these runtime environment variables in Dokploy (not Docker build arguments):
 
 - `DATABASE_PATH=/data/asystant.db`
 - `ASYSTANT_BIND=0.0.0.0:8787`
-- `OPENROUTER_API_KEY`: your provider key, stored as a secret.
-- `ASYSTANT_ORIGINS` (optional): initial comma-separated browser origins, e.g.
-  `https://app.turnosqr.com`. Manage them afterwards under **Allowed origins** in
-  the admin panel, where several can be added without a restart; see
-  [admin-panel.md](admin-panel.md#allowed-origins).
-- `ASYSTANT_PRODUCTS`: JSON product issuer, signing secret, model policy and budgets.
-- `ASYSTANT_MODELS`: JSON model/provider mappings and conservative price ceilings.
+- `OPENROUTER_MANAGEMENT_API_KEY`: OpenRouter management (provisioning) key of the
+  organization that owns the tenants' workspaces, stored as a secret.
+- `ASYSTANT_MANAGED_ENCRYPTION_KEY`: 32 random bytes in base64 that seal issued
+  keys (`openssl rand -base64 32`), stored as a secret. Keep it for the life of
+  the volume; rotate only at a UTC day boundary.
 
-Use [.env.example](../.env.example) as a template. It defaults to TurnosQR with
-`openai/gpt-oss-120b` as the sole allowed model. Model policy and allowed origins
-can then be changed without a restart in the [admin panel](admin-panel.md).
-The example daily caps are USD 10 per tenant and USD 1 per user, not subscription
-charges. Adjust them to your intended budget. `client_models` and `budget_overrides`
-are optional advanced settings; do not copy fictitious customer IDs.
+Set both managed variables or neither; without them the service starts but does
+not issue keys. Use [.env.example](../.env.example) as a template. Placeholder
+secrets must be replaced. Never commit actual secrets or SQLite files.
 
-Generate the product signing secret with `openssl rand -hex 32` and paste that
-same value into the product JSON `secret` and TurnosQR API
-`ASYSTANT_TICKET_SECRET`. This secret is separate from the OpenRouter API key.
- In individual Dokploy value
-fields enter raw JSON without shell quote characters. Placeholder secrets must
-be replaced. Never commit actual secrets or SQLite files.
+Remove the variables of the removed ticket/session gateway before deploying
+0.3.0: `ASYSTANT_PRODUCTS`, `ASYSTANT_MODELS`, `ASYSTANT_ORIGINS`,
+`ASYSTANT_ADMIN_TOKEN` and `OPENROUTER_API_KEY`. Startup refuses them so a
+deployment that still depends on that flow fails instead of serving 404s. The
+first start of 0.3.0 drops that flow's tables from the existing volume.
 
 Leave the start command unchanged. The default process applies embedded
 migrations before starting HTTP. For manual operations, `--migrate-only` applies
@@ -50,27 +44,27 @@ migrations and exits; `--serve` starts without migration and readiness fails if
 the schema is missing. Configure exactly **one replica** and stop the previous
 container before starting its replacement (no rolling overlap).
 
-## Domain and product integration
+## Domain and client integration
 
-Add your HTTPS domain in Dokploy, pointing to container port 8787. Configure the
-proxy for SSE: no response buffering, upstream timeout above 120 seconds,
-request/header timeouts and shared client admission limits. Restrict direct
-access to the container port. Do not expose the volume through a web server.
+Add your HTTPS domain in Dokploy, pointing to container port 8787. Configure
+request/header timeouts above 45 seconds (a key creation can take up to 40) and
+shared admission limits. Restrict direct access to the container port. Do not
+expose the volume through a web server.
 
-In TurnosQR API configure `ASYSTANT_GATEWAY_URL` to this HTTPS origin,
-`ASYSTANT_ISSUER` to the product issuer (e.g. `turnosqr`), and
-`ASYSTANT_TICKET_SECRET` to the same independent secret used in the product JSON.
-Tools continue to execute exclusively inside Flutter. The gateway handles
-credentials, provider access, model policy and accounting.
+Each client service stores this HTTPS origin and its client key in its own
+secret manager (for example `ASYSTANT_API_URL` and `ASYSTANT_API_KEY`) and calls
+the API only from its backend. See [managed keys](managed-keys.md).
 
 Health endpoints:
 
 - `/health/live`: the process is running.
 - `/health/ready`: database and migrated schema are accessible.
-- `/openapi.yaml`: public API specification without keys or tenant settings.
+- `/openapi.yaml`: public API specification without keys or client data.
 
-Health does not validate provider credentials. Test login, renewal, model policy,
-revocation, budget exhaustion and an actual model response before enabling users.
+Health does not validate the OpenRouter management key. Once a client exists
+(its creation surface comes with the administration panel), and before enabling
+users, set a small tenant and subject budget, issue a credential, lower the
+budget and check that the worker disables the key in the OpenRouter workspace.
 
 ## Backup, restore and failure handling
 
@@ -83,27 +77,23 @@ docker exec CONTAINER sqlite3 /data/asystant.db '.backup /data/asystant-backup.d
 docker cp CONTAINER:/data/asystant-backup.db ./asystant-backup.db
 ```
 
-Protect backups as sensitive data and remove temporary snapshots only after
-confirming off-volume backup success. For restore, stop the application, preserve
-the current volume for recovery, restore into a fresh volume owned by 10001:10001,
-and start one instance. Never combine a restored DB with old `-wal`/`-shm` files.
-Check readiness and session/accounting state before enabling traffic. Restoring
-an old snapshot can roll back revocations, consumed tickets and budgets: reconcile
-provider usage and invalidate affected sessions before serving traffic.
+Protect backups as sensitive data: they hold sealed provider keys and client key
+hashes. Remove temporary snapshots only after confirming off-volume backup
+success. For restore, stop the application, preserve the current volume for
+recovery, restore into a fresh volume owned by 10001:10001, and start one
+instance. Never combine a restored DB with old `-wal`/`-shm` files. Restoring an
+old snapshot can roll back revocations and budgets: compare the leases with the
+OpenRouter workspaces before serving traffic.
 
 WAL plus `synchronous=FULL` preserves committed writes. `BEGIN IMMEDIATE` makes
-reservation and settlement atomic; each connection waits up to five seconds for
-a writer. Keep transactions short. Lock exhaustion fails the request; it never
-bypasses accounting. Provider calls happen outside database transactions.
+reservation, issuance, revocation and settlement atomic; each connection waits
+up to five seconds for a writer. Lock exhaustion fails the request; it never
+bypasses accounting. OpenRouter calls happen outside database transactions.
 
-Do not refund pending reservations just because the process stopped. Compare
-uncertain usage against provider records. Monitor disk space and DB growth; no
-automatic retention or reconciliation worker is included. A volume on the same
-machine is persistence, not a backup.
-
-This release creates a fresh SQLite schema. It does **not** automatically migrate
-PostgreSQL records. If an older gateway served real requests, plan a data migration
-before cutover to preserve budgets, replay prevention and revoked sessions.
+Do not release reserved budget just because the process stopped: the worker
+settles it from confirmed OpenRouter usage. Monitor disk space and DB growth; no
+retention worker is included. A volume on the same machine is persistence, not a
+backup.
 
 ## Local container validation
 
